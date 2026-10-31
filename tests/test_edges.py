@@ -39,6 +39,9 @@ SITE = {
       <a href="scroll.html">прокрутка</a> <a href="dup.html">повторы</a> <a href="summary.html">summary</a>
       <a href="gone.png">нет картинки</a> <a href="ok.png"><img src="ok.png" width="40" height="40" alt="Есть"></a>
       <a href="p%D1%8F.png">кириллица</a> <a href="titles.html">подсказки</a> <a href="shifted.html#deep">сдвиг</a>
+      <a href="hidden.html">скрытое</a> <a href="widetable.html">таблица</a> <a href="own.html#__w2p_1">служебный id</a>
+      <a href="own.html?__w2p_t=abc">свой параметр</a> <a href="selfrefresh.html">сама себя</a> <a href="to404.html">на 404</a>
+      <a href="chain0.html">цепочка</a> <a href="redirfrag.html#own">свой якорь</a>
       <img src="map.png" usemap="#m" width="40" height="40"><map name="m"><area shape="rect" coords="0,0,40,40" href="viaarea.html"></map>
     """),
     "/svg.html": page("SVG", '<svg width="200" height="50"><a href="target.html"><text x="5" y="20">ссылка из svg</text></a></svg>'),
@@ -59,9 +62,24 @@ SITE = {
     "/shifted.html": page("Сдвиг", '<h2 id="deep">Сдвинутая цель</h2>' + FILLER,
                           "<style>body{position:relative;min-width:3000px;margin-top:1950px}</style>"),
     "/viaarea.html": page("Через область", "МЕТКА-ЧЕРЕЗ-ОБЛАСТЬ"),
+    "/hidden.html": page("Скрытое",
+        '<div style="position:relative"><div id="menu" style="position:absolute;max-height:0;overflow:hidden">ПУНКТ-МЕНЮ</div>'
+        '<div style="position:absolute;width:1px;height:1px;overflow:hidden">ТЕКСТ-ЧТЕЦА</div>'
+        '<div style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;width:200px">'
+        + "начало слова " * 40 + 'КОНЕЦ-ОБРЕЗКИ</div><p>МЕТКА-ПОСЛЕ-ОБРЕЗКИ</p></div>'),
+    "/widetable.html": page("Широкая", '<div style="overflow-x:auto"><table><tr>' + "".join(
+        '<td style="min-width:200px">СТОЛБЕЦ-%d</td>' % n for n in range(15)) + '</tr></table></div>'
+        '<div style="height:60px;overflow:auto;width:300px">' + "слово " * 80 + 'КОНЕЦ-БЛОКА</div>'),
+    "/own.html": page("Свои имена", '<h2>Без id</h2>' + FILLER + '<h2 id="__w2p_1">Свой служебный</h2>'
+                      '<h3 id="__w2p_probe_a">Проба</h3>' + FILLER),
+    "/selfrefresh.html": page("Сама себя", "МЕТКА-САМА-СЕБЯ", '<meta http-equiv="refresh" content="0">'),
+    "/to404.html": page("На 404", "уходим", '<meta http-equiv="refresh" content="0;url=nothing.html">'),
+    "/chain8.html": page("Конец цепочки", "МЕТКА-КОНЕЦ-ЦЕПОЧКИ"),
     "/ok.png": PNG, "/map.png": PNG, "/pя.png": PNG,
 }
-REDIRECTS = {"/off.html": "http://example.invalid/page", "/moved.html": "/target.html", "/movedfrag.html": "/target.html#x"}
+for _n in range(8):
+    SITE["/chain%d.html" % _n] = page("Цепочка", "шаг", '<meta http-equiv="refresh" content="0;url=chain%d.html">' % (_n + 1))
+REDIRECTS = {"/redirfrag.html": "/target.html#x", "/off.html": "http://example.invalid/page", "/moved.html": "/target.html", "/movedfrag.html": "/target.html#x"}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -210,6 +228,23 @@ def main_site(tmp):
         "y" in l and l["sheet"] >= shifted and 0 < l["y"] < 843 and doc.at(l["sheet"], l["y"], "Сдвинутая") for l in first))
     check("страница через <area> обойдена и область названа в сводке",
           "МЕТКА-ЧЕРЕЗ-ОБЛАСТЬ" in all_text and "viaarea.html" in run.stdout)
+    check("прятавшее overflow:hidden не проявилось", "ПУНКТ-МЕНЮ" not in all_text and "ТЕКСТ-ЧТЕЦА" not in all_text
+          and "КОНЕЦ-ОБРЕЗКИ" not in all_text and "МЕТКА-ПОСЛЕ-ОБРЕЗКИ" in all_text)
+    check("широкая таблица в overflow-x уместилась целиком", all("СТОЛБЕЦ-%d" % n in all_text for n in range(15))
+          and "масштаб уменьшен" in run.stdout, run.stdout[-300:])
+    width_ok = all(w["x1"] <= float(p.width) + 1 for p in doc.plumber.pages[doc.section("Широкая"):doc.section("Широкая") + 1]
+                   for w in p.extract_words())
+    check("широкая таблица не вылезла за лист", width_ok)
+    check("прокручиваемый блок, который на экране умещался, не обрезан", "КОНЕЦ-БЛОКА" in all_text)
+    check("id вида __w2p_1 ведёт на свой заголовок", any("y" in l and doc.at(l["sheet"], l["y"], "Свой") for l in first))
+    # own.html?__w2p_t=abc это отдельная страница сайта, поэтому раздел с таким заголовком второй
+    own_sections = [doc.reader.get_destination_page_number(i) for i in doc.reader.outline
+                    if not isinstance(i, list) and str(i.title) == "Свои имена"]
+    check("ссылка со своим параметром __w2p_ осталась переходом и не упала",
+          len(own_sections) == 2 and any(l.get("sheet") == own_sections[1] for l in first), str(own_sections))
+    check("страница, обновляющая сама себя, напечатана", "МЕТКА-САМА-СЕБЯ" in all_text, run.stdout[-300:])
+    check("meta refresh на 404 не даёт раздела", "На 404" not in top_titles and "to404.html" in run.stdout)
+    check("длинная цепочка meta refresh дошла до конца", "МЕТКА-КОНЕЦ-ЦЕПОЧКИ" in all_text)
     server.shutdown()
 
 
@@ -244,6 +279,23 @@ def hanging_image(tmp):
     server.shutdown()
 
 
+def hanging_font(tmp):
+    import socket
+    silent = socket.socket()
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(5)
+    css = "<style>@font-face{font-family:H;src:url(http://127.0.0.1:%d/f.woff2)}h1{font-family:H,Arial}</style>" % silent.getsockname()[1]
+    server, base = serve({"/": page("Шрифт", "<h1>МЕТКА-ШРИФТ</h1>", css)})
+    out = os.path.join(tmp, "font.pdf")
+    try:
+        run = run_tool(base + "/", out, "--timeout", "4")
+        check("зависший шрифт не вешает запуск", run.returncode == 0 and os.path.exists(out), run.stdout[-300:])
+    except subprocess.TimeoutExpired:
+        check("зависший шрифт не вешает запуск", False, "завис")
+    silent.close()
+    server.shutdown()
+
+
 def index_only(tmp):
     """Сервер отдаёт только /d/index.html, каталог /d/ даёт 404."""
     server, base = serve({"/d/index.html": page("Индекс", '<a href="other.html">дальше</a>'),
@@ -267,6 +319,15 @@ def venv_guard(tmp):
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, universal_newlines=True)
     check("чужой каталог в WWW2PDF_VENV не стёрт", os.path.exists(keep) and run.returncode != 0, run.stdout[-300:])
 
+    notes = os.path.join(tmp, "uservenv")
+    subprocess.run(["/usr/bin/python3", "-m", "venv", "--without-pip", notes], check=True)
+    keep = os.path.join(notes, "my_notes.txt")
+    open(keep, "w").close()
+    env = dict(os.environ, WWW2PDF_VENV=notes)
+    run = subprocess.run(["/usr/bin/python3", TOOL, "http://127.0.0.1:9/", "-o", os.path.join(tmp, "x.pdf")],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, universal_newlines=True)
+    check("файлы пользователя в чужом venv не стёрты", os.path.exists(keep), run.stdout[-300:])
+
     broken = os.path.join(tmp, "brokenvenv")
     os.makedirs(os.path.join(broken, "bin"))
     open(os.path.join(broken, "pyvenv.cfg"), "w").close()
@@ -281,10 +342,12 @@ def venv_guard(tmp):
 
 
 def bad_options(tmp):
-    for extra, what in ((["--margin", "-1"], "--margin"), (["--margin", "200"], "--margin"), (["--max", "0"], "--max"),
+    for extra, what in ((["--margin", "-1"], "--margin"), (["--margin", "200"], "--margin"), (["--margin", "105"], "--margin"), (["--max", "0"], "--max"),
                         (["--timeout", "0"], "--timeout")):
         run = run_tool("http://127.0.0.1:9/", os.path.join(tmp, "x.pdf"), *extra)
         check("понятная ошибка: %s" % " ".join(extra), run.returncode == 2 and what in run.stdout, run.stdout[-200:])
+    run = run_tool("http://[bad/", os.path.join(tmp, "x.pdf"))
+    check("понятная ошибка: неверный адрес", run.returncode == 2 and "Traceback" not in run.stdout, run.stdout[-200:])
     run = run_tool("http://127.0.0.1:9/", tmp)
     check("понятная ошибка: -o указывает на каталог", run.returncode == 2 and "Traceback" not in run.stdout, run.stdout[-200:])
 
@@ -317,6 +380,7 @@ def main():
         venv_guard(tmp)
         main_site(tmp)
         hanging_image(tmp)
+        hanging_font(tmp)
         index_only(tmp)
         long_pages_vh(tmp)
     finally:

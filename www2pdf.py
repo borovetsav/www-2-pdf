@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import posixpath
+import re
 import shutil
 import subprocess
 import sys
@@ -38,12 +39,13 @@ IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".avif"}
 PT_PER_MM = 72 / 25.4
 PT_PER_PX = 0.75
 JUMP_HEADROOM_PT = 4  # небольшой зазор над целью, чтобы она не прилипала к краю окна
-TINY_LINK_PT = 2      # служебные невидимые ссылки меньше этого размера по обеим осям удаляются
-MARK_PREFIX = "__w2p_"  # метки в адресах ссылок, которые снимаются при разборе PDF
+MIN_PRINTABLE_PT = 144  # меньше этой области печати на листе вёрстка теряет смысл
+MIN_FIT_SCALE = 0.1   # меньше Chrome не умеет
+VENV_ENTRIES = {"bin", "include", "lib", "lib64", "pyvenv.cfg", ".gitignore"}  # всё, что создаёт python -m venv
 MAX_REFRESH_SECONDS = 5  # <meta refresh> с такой задержкой считаем редиректом
+MAX_REFRESH_HOPS = 20
 DEFAULT_PORTS = {"http": 80, "https": 443}
 APPENDIX_TITLE = "Изображения"
-PROBE_IDS = ("__w2p_probe_a", "__w2p_probe_b")  # пробные якоря для измерения координат
 MAX_PDF_SIDE_PT = 14400  # предел размера страницы в PDF
 
 # Подготовка страницы к печати. Возвращает данные для закладок и проверок.
@@ -81,21 +83,6 @@ async (imageWaitMs) => {
     if (p === 'fixed' || p === 'sticky') el.style.setProperty('position', 'static', 'important');
   }
 
-  // Прокручиваемые блоки на бумаге обрезаются, поэтому показываем их содержимое целиком.
-  // Многоточие и обрезку только по ширине у overflow:hidden оставляем: это часть оформления.
-  for (const el of document.querySelectorAll('html, body, body *')) {
-    const cs = getComputedStyle(el);
-    const values = [cs.overflowX, cs.overflowY];
-    if (values.every(v => v === 'visible') || cs.textOverflow === 'ellipsis') continue;
-    const tall = el.scrollHeight > el.clientHeight + 1, wide = el.scrollWidth > el.clientWidth + 1;
-    const scrollable = values.some(v => v === 'auto' || v === 'scroll');
-    if (tall || (wide && scrollable)) {
-      el.style.setProperty('overflow', 'visible', 'important');
-      el.style.setProperty('height', 'auto', 'important');
-      el.style.setProperty('max-height', 'none', 'important');
-    }
-  }
-
   const st = document.createElement('style');
   st.textContent = [
     'pre{white-space:pre-wrap!important}',
@@ -116,7 +103,26 @@ async (imageWaitMs) => {
       setTimeout(res, imageWaitMs);
     });
   }));
-  if (document.fonts && document.fonts.ready) await document.fonts.ready;
+  // Зависший шрифт не должен вешать запуск
+  if (document.fonts && document.fonts.ready) {
+    await Promise.race([document.fonts.ready, new Promise(res => setTimeout(res, imageWaitMs))]);
+  }
+
+  // Прокручиваемые блоки на бумаге обрезаются, поэтому показываем их содержимое целиком.
+  // Ширина вёрстки на листе другая, поэтому раскрываем все, а не только переполненные сейчас.
+  // overflow:hidden не трогаем: это оформление (круглые аватары, меню, текст для экранных чтецов).
+  for (const el of document.querySelectorAll('body, body *')) {
+    const cs = getComputedStyle(el);
+    if ([cs.overflowX, cs.overflowY].some(v => v === 'auto' || v === 'scroll')) {
+      el.style.setProperty('overflow', 'visible', 'important');
+      el.style.setProperty('height', 'auto', 'important');
+      el.style.setProperty('max-height', 'none', 'important');
+    }
+  }
+
+  // Служебные имена не должны совпасть с тем, что уже есть на странице
+  let prefix = '__w2p_';
+  while (document.documentElement.outerHTML.includes(prefix)) prefix += 'x';
 
   // Закладки: заголовки h1-h3 и раскрывашки с вложенностью как в DOM
   // Классические якоря <a name> браузер считает целями наравне с id.
@@ -135,7 +141,7 @@ async (imageWaitMs) => {
   const anchorOf = el => {
     const id = idOf(el);
     if (id && !dup.includes(id)) return id;
-    const own = '__w2p_' + (++tmpN);
+    const own = prefix + (++tmpN);
     if (!id) { el.setAttribute('id', own); return own; }
     // Повторяющийся id ведёт на первый элемент, поэтому закладке нужен свой якорь
     const mark = document.createElement('span');
@@ -183,7 +189,7 @@ async (imageWaitMs) => {
   // Сравнивая их, узнаём настоящее преобразование именно для этой страницы.
   const probes = [0, 200].map((top, i) => {
     const a = document.createElement('a');
-    const id = ['__w2p_probe_a', '__w2p_probe_b'][i];
+    const id = prefix + ['probe_a', 'probe_b'][i];
     a.setAttribute('id', id);
     a.setAttribute('href', '#' + id);
     a.style.cssText = 'position:absolute;left:0;top:' + top + 'px;display:block;width:16px;height:16px';
@@ -192,8 +198,8 @@ async (imageWaitMs) => {
   });
 
   // Ссылки: цели для обхода, подсказки title, подписи к картинкам
-  // У ссылки внутри SVG свойство href не строка, поэтому читаем атрибут
-  const rawHref = a => a.getAttribute('href') || a.getAttribute('xlink:href');
+  // У ссылки внутри SVG свойство href не строка, поэтому читаем атрибут. Пустой href тоже ссылка.
+  const rawHref = a => a.hasAttribute('href') ? a.getAttribute('href') : a.getAttribute('xlink:href');
   const parse = a => {
     try { return new URL(rawHref(a), document.baseURI); } catch (e) { return null; }
   };
@@ -215,36 +221,20 @@ async (imageWaitMs) => {
                 area: a.tagName === 'AREA'});
   }
 
-  // Метки в адресе заставляют Chrome отдать ссылку как URI, а мы их потом снимаем
-  const addMark = (a, mark) => {
-    const url = parse(a);
-    url.search = (url.search ? url.search + '&' : '?') + mark;
-    a.setAttribute('href', url.href);
-  };
-  const sans = u => u.split('#')[0];
-  const here = sans(location.href), base = sans(document.baseURI);
-  const titlesByHref = new Map();
-  links.forEach(l => { if (l.title) titlesByHref.set(l.href, (titlesByHref.get(l.href) || new Set()).add(l.title)); });
+  // Номер в адресе: Chrome отдаёт такую ссылку как URI и не сравнивает её с якорями страницы
+  // и с <base>, а мы по номеру точно находим адрес и title именно этой ссылки.
   linkEls.forEach((a, i) => {
     const url = parse(a);
-    if (!url) return;
-    // Один адрес с разными title: метка позволит найти title именно этой ссылки
-    if ((titlesByHref.get(links[i].href) || new Set()).size > 1) addMark(a, '__w2p_t=' + i);
-    if (!url.hash) return;
-    let id = url.hash.slice(1), decoded = id;
-    try { decoded = decodeURIComponent(id); } catch (e) {}
-    const page = sans(url.href);
-    // Chrome сравнивает адрес с <base>: чужую страницу он примет за свою.
-    // А ссылку на несуществующий id своей страницы он выбрасывает из PDF.
-    if ((page === base && base !== here) || (page === here && !ids.has(id) && !ids.has(decoded))) {
-      addMark(a, '__w2p_missing=1');
-    }
+    if (!url || !/^https?:$/.test(url.protocol)) return;
+    url.search = (url.search ? url.search + '&' : '?') + prefix + i + '=1';
+    a.setAttribute('href', url.href);
   });
   return {
     title: document.title || '',
     outline,
     links,
     anchorNames,
+    prefix,
     duplicateIds: dup,
     closedDetails: document.querySelectorAll('details:not([open])').length,
     details: document.querySelectorAll('details').length,
@@ -257,8 +247,11 @@ META_REFRESH_JS = r"""
 () => {
   const meta = document.querySelector('meta[http-equiv="refresh" i]');
   if (!meta) return null;
-  const match = /^\s*(\d+(?:\.\d+)?)\s*[;,]\s*(?:url\s*=\s*)?\S/i.exec(meta.getAttribute('content') || '');
-  return match ? Number(match[1]) : null;
+  const match = /^\s*(\d+(?:\.\d+)?)\s*(?:[;,]\s*(?:url\s*=\s*)?['"]?([^'"\s]+))?/i.exec(meta.getAttribute('content') || '');
+  if (!match) return null;
+  // Обновление без адреса или на саму себя никуда не ведёт
+  const target = match[2] ? new URL(match[2], document.baseURI).href.split('#')[0] : location.href.split('#')[0];
+  return {delay: Number(match[1]), moves: target !== location.href.split('#')[0]};
 }
 """
 
@@ -334,12 +327,13 @@ def python_candidates():
 
 
 def clear_venv_dir():
-    """Удаляет только настоящий venv: каталог с чужими файлами трогать нельзя."""
+    """Удаляет только то, что похоже на чистый venv: файлы пользователя трогать нельзя."""
     if os.path.lexists(VENV_DIR) and not os.path.isdir(VENV_DIR):
         sys.exit("%s не каталог, venv там создать нельзя. Укажите другой путь в WWW2PDF_VENV." % VENV_DIR)
     if os.path.isdir(VENV_DIR) and os.listdir(VENV_DIR):
-        if not os.path.exists(os.path.join(VENV_DIR, "pyvenv.cfg")):
-            sys.exit("%s не пуст и не похож на venv, удалять его не буду. Укажите другой путь в WWW2PDF_VENV." % VENV_DIR)
+        extra = set(os.listdir(VENV_DIR)) - VENV_ENTRIES
+        if extra or not os.path.exists(os.path.join(VENV_DIR, "pyvenv.cfg")):
+            sys.exit("В %s есть посторонние файлы, удалять каталог не буду. Укажите другой путь в WWW2PDF_VENV." % VENV_DIR)
         shutil.rmtree(VENV_DIR, ignore_errors=True)
 
 
@@ -410,16 +404,10 @@ def extension(url):
     return posixpath.splitext(urlsplit(url).path)[1].lower()
 
 
-def strip_marks(url):
-    """Снимает служебные метки. Возвращает (адрес, номер ссылки для поиска title или None)."""
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return url, None
-    query = "&".join(q for q in parts.query.split("&") if not q.startswith(MARK_PREFIX))
-    number = parse_qs(parts.query).get(MARK_PREFIX + "t")
-    return (urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment)),
-            int(number[0]) if number else None)
+def link_number(uri, prefix):
+    """Номер ссылки из служебной метки в адресе или None."""
+    match = re.search(r"[?&]" + re.escape(prefix) + r"(\d+)=1", uri)
+    return int(match.group(1)) if match else None
 
 
 def clean_dest_name(name):
@@ -457,41 +445,50 @@ def paper_size_pt(paper):
 
 
 def print_page(page, path, args):
-    if not args.long_pages:
-        page.pdf(path=path, **pdf_options(args))
-        return
+    """Печатает страницу. Возвращает масштаб: страницу шире листа он уменьшает, чтобы ничего не обрезалось."""
     from pypdf import PdfReader
     width_pt = paper_size_pt(args.paper)[0]
     margin_pt = args.margin * PT_PER_MM
-    layout_px = (width_pt - 2 * margin_pt) / (PT_PER_PX * args.scale)
+    printable = width_pt - 2 * margin_pt
+    scale = args.scale
+    layout_px = printable / (PT_PER_PX * scale)
     page.set_viewport_size({"width": int(layout_px), "height": 900})
+    content_px = page.evaluate("document.documentElement.scrollWidth")
+    if content_px > layout_px + 1:
+        scale = max(MIN_FIT_SCALE, int(printable / (PT_PER_PX * content_px) * 1000) / 1000)
+    if not args.long_pages:
+        page.set_viewport_size({"width": 1280, "height": 900})
+        page.pdf(path=path, **pdf_options(args, scale=scale))
+        return scale
+    page.set_viewport_size({"width": int(printable / (PT_PER_PX * scale)), "height": 900})
     page.evaluate(FREEZE_VH_JS)
     doc_px = page.evaluate("document.documentElement.scrollHeight")
-    height_pt = doc_px * PT_PER_PX * args.scale + 2 * margin_pt + 2
+    height_pt = doc_px * PT_PER_PX * scale + 2 * margin_pt + 2
     if height_pt > MAX_PDF_SIDE_PT:
         log("  страница длиннее предела PDF, она займёт несколько листов")
         height_pt = MAX_PDF_SIDE_PT
-    page.pdf(path=path, **pdf_options(args, width_pt, height_pt))
+    page.pdf(path=path, **pdf_options(args, width_pt, height_pt, scale))
     sheets = len(PdfReader(path).pages)
     if sheets > 1 and height_pt < MAX_PDF_SIDE_PT:
         # Вёрстка на бумаге бывает выше, чем на экране: повторяем с запасом
         height_pt = min(height_pt * sheets, MAX_PDF_SIDE_PT)
-        page.pdf(path=path, **pdf_options(args, width_pt, height_pt))
+        page.pdf(path=path, **pdf_options(args, width_pt, height_pt, scale))
     page.set_viewport_size({"width": 1280, "height": 900})
+    return scale
 
 
 def open_url(page, candidates, timeout_ms):
     """Открывает первый рабочий адрес. Возвращает (ответ, дождались ли load, причина неудачи)."""
-    response, why = None, "нет адреса"
+    response, why = None, None
     for url in candidates:
         try:
             response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         except Exception as exc:
-            response, why = None, "ошибка загрузки: %s" % str(exc).split("\n")[0]
+            response, why = None, why or "ошибка загрузки: %s" % str(exc).split("\n")[0]
             continue
         if response is not None and response.status < 400:
             return response, wait_load(page, timeout_ms), None
-        why = "HTTP %s" % (response.status if response else "?")
+        why = why or "HTTP %s" % (response.status if response else "?")
     return None, False, why
 
 
@@ -505,21 +502,38 @@ def wait_load(page, timeout_ms):
 
 
 def follow_client_redirects(page, timeout_ms):
-    """Дожидается редиректов через <meta refresh> с небольшой задержкой."""
-    for _ in range(5):
+    """Проходит редиректы <meta refresh> с небольшой задержкой. Остальные обновления отключает."""
+    for _ in range(MAX_REFRESH_HOPS):
         try:
-            delay = page.evaluate(META_REFRESH_JS)
+            refresh = page.evaluate(META_REFRESH_JS)
         except Exception:  # страница как раз уходит на новый адрес
             wait_load(page, timeout_ms)
             continue
-        if delay is None or delay > MAX_REFRESH_SECONDS:
+        if refresh is None:
             return
+        if refresh["delay"] > MAX_REFRESH_SECONDS or not refresh["moves"]:
+            break
         current = page.url
         try:
-            page.wait_for_url(lambda u: u != current, timeout=(delay + 3) * 1000, wait_until="domcontentloaded")
-        except Exception:  # обновляет сама себя или адрес неверный
-            return
+            page.wait_for_url(lambda u: u != current, timeout=(refresh["delay"] + 3) * 1000, wait_until="domcontentloaded")
+        except Exception:
+            break
         wait_load(page, timeout_ms)
+    freeze_refresh(page, timeout_ms)
+
+
+def freeze_refresh(page, timeout_ms):
+    """Страница, которая обновляет сама себя, сорвёт печать: загружаем её без этого тега."""
+    def strip(route):
+        response = route.fetch()
+        body = re.sub(r"<meta[^>]*http-equiv\s*=\s*[\"']?refresh[^>]*>", "", response.text(), flags=re.I)
+        route.fulfill(response=response, body=body)
+    try:
+        page.route(page.url.split("#")[0], strip)
+        page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
+        wait_load(page, timeout_ms)
+    except Exception as exc:
+        log("  не удалось отключить обновление страницы: %s" % str(exc).split("\n")[0])
 
 
 def prepare_and_print(page, path, args, timeout_ms, loaded):
@@ -529,7 +543,7 @@ def prepare_and_print(page, path, args, timeout_ms, loaded):
     for _ in range(3):
         try:
             info = page.evaluate(PREPARE_JS, image_wait)
-            print_page(page, path, args)
+            info["scale"] = print_page(page, path, args)
             return info, None
         except Exception as exc:
             last_error = str(exc).split("\n")[0]
@@ -548,6 +562,12 @@ def render_site(context, args, tmp_dir):
     timeout_ms = args.timeout * 1000
 
     def visit(page, url, raw):
+        statuses = {}
+
+        def remember_status(response):
+            if response.request.is_navigation_request() and response.frame == page.main_frame:
+                statuses["last"] = response.status
+        page.on("response", remember_status)
         # Сервер может отдавать только /dir/index.html или только /dir/
         attempts = [raw] + [u for u in (url, url + "index.html" if url.endswith("/") else None) if u and u != raw]
         response, loaded, why = open_url(page, attempts, timeout_ms)
@@ -559,6 +579,9 @@ def render_site(context, args, tmp_dir):
             skipped.append((url, "не HTML: %s" % ctype))
             return
         follow_client_redirects(page, timeout_ms)
+        if statuses.get("last", 200) >= 400:
+            skipped.append((url, "после редиректа HTTP %s: %s" % (statuses["last"], page.url)))
+            return
         final = normalize_url(page.url)
         if not same_site(final, root):
             skipped.append((url, "редирект на другой сайт: %s" % page.url))
@@ -662,13 +685,14 @@ def escape_html(text):
 
 # ---------- Склейка и ссылки ----------
 
-def measure_transform(reader, margin_pt, scale):
+def measure_transform(reader, margin_pt, scale, prefix):
     """Грабли №2: координаты якорей Chrome не совпадают с настоящими на листе.
 
     Он пишет их так, будто scale = 1; учёт верхнего поля зависит от версии (Chrome 156
     поля не добавляет), а страницу шире листа Chrome ещё и ужимает сам. Поэтому поправка
     измеряется для каждой страницы: y_верно от верха = shift + y_из_PDF от верха * factor.
     """
+    probe_a, probe_b = prefix + "probe_a", prefix + "probe_b"
     try:
         dests = {clean_dest_name(k): v for k, v in reader.named_destinations.items()}
         real, raw = {}, {}
@@ -676,14 +700,12 @@ def measure_transform(reader, margin_pt, scale):
             height = float(page.mediabox.height)
             for ref in page.get("/Annots") or []:
                 annot = ref.get_object()
-                action = annot.get("/A")
-                name = annot.get("/Dest") or (action.get_object().get("/D") if action is not None else None)
-                if isinstance(name, str) and clean_dest_name(name) in PROBE_IDS:
-                    key = clean_dest_name(name)
-                    real[key] = height - max(float(annot["/Rect"][1]), float(annot["/Rect"][3]))
-                    raw[key] = height - float(dests[key].top)
-        factor = (real[PROBE_IDS[1]] - real[PROBE_IDS[0]]) / (raw[PROBE_IDS[1]] - raw[PROBE_IDS[0]])
-        shift = real[PROBE_IDS[0]] - raw[PROBE_IDS[0]] * factor
+                name = annot_dest_name(annot)
+                if name in (probe_a, probe_b):
+                    real[name] = height - max(float(annot["/Rect"][1]), float(annot["/Rect"][3]))
+                    raw[name] = height - float(dests[name].top)
+        factor = (real[probe_b] - real[probe_a]) / (raw[probe_b] - raw[probe_a])
+        shift = real[probe_a] - raw[probe_a] * factor
         if factor <= 0:
             raise ValueError(factor)
     except (KeyError, ZeroDivisionError, TypeError, ValueError, IndexError) as exc:
@@ -691,6 +713,17 @@ def measure_transform(reader, margin_pt, scale):
         log("  измерить координаты не удалось (%r), переходы могут быть неточными" % (exc,))
         return {"shift": margin_pt, "factor": scale, "measured": False}
     return {"shift": shift, "factor": factor, "measured": True}
+
+
+def annot_dest_name(annot):
+    """Имя назначения у аннотации-ссылки или None, если назначение не именованное."""
+    action = annot.get("/A")
+    name = annot.get("/Dest")
+    if name is None and action is not None:
+        action = action.get_object()
+        if action.get("/S") == "/GoTo":
+            name = action.get("/D")
+    return clean_dest_name(name) if isinstance(name, str) else None
 
 
 def read_anchors(reader, start, transform, anchor_names):
@@ -727,17 +760,17 @@ def build_pdf(crawl, appendix, args):
     parts = list(sections)
     if appendix:
         parts.append({"url": None, "path": appendix["path"], "info": appendix["info"]})
-    clipped = []
+    clipped, shrunk = [], []
     for part in parts:
         part["reader"] = PdfReader(part["path"])
         part["start"] = len(writer.pages)
-        part["transform"] = measure_transform(part["reader"], margin_pt, args.scale)
-        ratio = part["transform"]["factor"] / args.scale
-        if part["url"] and ratio < 0.995:
-            log("  %s шире листа, Chrome ужал её: масштаб %.3f вместо %g" % (part["url"], part["transform"]["factor"], args.scale))
-            # Сильнее чем вдвое Chrome не ужимает: остальное уходит за край листа
-            if ratio <= 0.505:
-                clipped.append(part["url"])
+        scale = part["info"].get("scale", args.scale)
+        part["transform"] = measure_transform(part["reader"], margin_pt, scale, part["info"]["prefix"])
+        if part["url"] and part["transform"]["factor"] < args.scale - 0.005:
+            shrunk.append((part["url"], part["transform"]["factor"]))
+        # Даже на предельном масштабе страница может не поместиться
+        if part["url"] and part["transform"]["factor"] < scale - 0.005:
+            clipped.append(part["url"])
         part["anchors"], part["names"] = read_anchors(part["reader"], part["start"], part["transform"],
                                                       part["info"]["anchorNames"])
         # Аннотации создаём сами ниже: так ни одна ссылка не потеряется при склейке (грабли №10)
@@ -749,7 +782,7 @@ def build_pdf(crawl, appendix, args):
         "goto_anchor": 0, "goto_section": 0, "goto_same_page": 0, "goto_image": 0, "uri_external": 0,
         "uri_own_kept": 0, "hidden_removed": 0, "other": 0,
     }
-    own_kept, title_conflicts = [], 0
+    own_kept = []
 
     def page_top(index):
         return float(writer.pages[index].mediabox.height)
@@ -764,9 +797,9 @@ def build_pdf(crawl, appendix, args):
         })
 
     def resolve_target(uri):
-        """Адрес на своём сайте -> (адрес раздела, фрагмент) с учётом редиректов."""
+        """Адрес на своём сайте -> (адрес раздела, фрагмент). Фрагмент из редиректа важнее, как в браузере."""
         target = normalize_url(uri)
-        frag = urlsplit(uri).fragment or alias_fragments.get(target, "")
+        frag = alias_fragments.get(target) or urlsplit(uri).fragment
         return aliases.get(target, target), frag
 
     def resolve_uri(uri, source):
@@ -785,25 +818,14 @@ def build_pdf(crawl, appendix, args):
         if frag:
             a = find_anchor(part["anchors"], frag)
             if a:
-                return goto(a[0], a[1]), "goto_anchor"
+                return goto(a[0], a[1]), "goto_same_page" if part is source else "goto_anchor"
         return goto(part["start"], page_top(part["start"])), "goto_section"
 
     appendix_part = parts[-1] if appendix else None
     for part in parts:
-        titles = {}
-        for link in part["info"]["links"]:
-            if link["title"]:
-                # Ссылки внутри страницы приходят без адреса, только с именем якоря
-                keys = [link["href"]]
-                if part["url"] and same_site(link["href"], root) and normalize_url(link["href"]) == part["url"]:
-                    frag = urlsplit(link["href"]).fragment
-                    if frag:
-                        keys.append("#" + frag)
-                        keys.append("#" + unquote(frag))
-                for key in keys:
-                    if titles.get(key, link["title"]) != link["title"]:
-                        title_conflicts += 1
-                    titles.setdefault(key, link["title"])
+        links = part["info"]["links"]
+        # Подсказки у ссылок не на http: mailto и подобные приходят без служебной метки
+        other_titles = {l["href"]: l["title"] for l in links if l["title"]}
         for offset, src_page in enumerate(part["reader"].pages):
             out_page = writer.pages[part["start"] + offset]
             fresh = []
@@ -812,37 +834,25 @@ def build_pdf(crawl, appendix, args):
                 if annot.get("/Subtype") != "/Link":
                     continue
                 rect = [float(v) for v in annot["/Rect"]]
-                probe = annot.get("/Dest")
-                if probe is None and annot.get("/A") is not None:
-                    probe = annot["/A"].get_object().get("/D")
-                if isinstance(probe, str) and clean_dest_name(probe) in PROBE_IDS:
-                    continue
-                if abs(rect[2] - rect[0]) < TINY_LINK_PT and abs(rect[3] - rect[1]) < TINY_LINK_PT:
+                # Настоящие http-ссылки всегда приходят как URI, именованные назначения только у служебных
+                if annot_dest_name(annot) is not None:
                     stats["hidden_removed"] += 1
                     continue
                 action_src = annot.get("/A")
                 action_src = action_src.get_object() if action_src is not None else None
-                uri, link_number = None, None
-                name = annot.get("/Dest")
-                if action_src is not None and action_src.get("/S") == "/URI":
-                    uri, link_number = strip_marks(str(action_src["/URI"]))
-                elif action_src is not None and action_src.get("/S") == "/GoTo":
-                    name = action_src.get("/D")
-                action, kind = None, "other"
-                if uri is not None:
-                    action, kind = resolve_uri(uri, part)
-                    if action is None:
-                        action = DictionaryObject({NameObject("/S"): NameObject("/URI"),
-                                                   NameObject("/URI"): TextStringObject(uri)})
-                elif name is not None and not isinstance(name, ArrayObject):
-                    a = part["names"].get(clean_dest_name(name))
-                    if a:
-                        action, kind = goto(a[0], a[1]), "goto_same_page"
-                    else:
-                        action, kind = goto(part["start"], page_top(part["start"])), "goto_section"
-                if action is None:
+                if action_src is None or action_src.get("/S") != "/URI":
                     stats["other"] += 1
                     continue
+                uri = str(action_src["/URI"])
+                number = link_number(uri, part["info"]["prefix"])
+                if number is not None:
+                    uri, title = links[number]["href"], links[number]["title"]
+                else:
+                    title = other_titles.get(uri)
+                action, kind = resolve_uri(uri, part)
+                if action is None:
+                    action = DictionaryObject({NameObject("/S"): NameObject("/URI"),
+                                               NameObject("/URI"): TextStringObject(uri)})
                 stats[kind] += 1
                 new = DictionaryObject({
                     NameObject("/Type"): NameObject("/Annot"),
@@ -851,10 +861,6 @@ def build_pdf(crawl, appendix, args):
                     NameObject("/Border"): ArrayObject([NumberObject(0)] * 3),
                     NameObject("/A"): action,
                 })
-                if link_number is not None:
-                    title = part["info"]["links"][link_number]["title"]
-                else:
-                    title = titles.get(uri) if uri else titles.get("#" + clean_dest_name(name))
                 if title:
                     new[NameObject("/Contents")] = TextStringObject(title)
                 fresh.append(writer._add_object(new))
@@ -902,7 +908,7 @@ def build_pdf(crawl, appendix, args):
                 else:
                     anchored["inexact"] += 1
     return {"pages": len(writer.pages), "links": stats, "anchored": anchored, "own_kept": own_kept,
-            "title_conflicts": title_conflicts, "output": output, "clipped": clipped,
+            "output": output, "clipped": clipped, "shrunk": shrunk,
             "transforms": {p["url"] or "images": p["transform"] for p in parts}}
 
 
@@ -981,14 +987,17 @@ def parse_args(argv):
     args = p.parse_args(argv)
     if not 0.1 <= args.scale <= 2:
         p.error("--scale должен быть от 0.1 до 2")
-    if args.margin < 0 or 2 * args.margin * PT_PER_MM >= min(paper_size_pt(args.paper)):
-        p.error("--margin должен быть не меньше 0 и меньше половины листа")
+    if args.margin < 0 or min(paper_size_pt(args.paper)) - 2 * args.margin * PT_PER_MM < MIN_PRINTABLE_PT:
+        p.error("--margin должен быть не меньше 0 и оставлять на листе хотя бы 5 см для печати")
     if args.max < 1:
         p.error("--max должен быть не меньше 1")
     if args.timeout < 1:
         p.error("--timeout должен быть не меньше 1")
-    if urlsplit(args.url).scheme not in ("http", "https"):
-        p.error("адрес должен начинаться с http:// или https://")
+    try:
+        if urlsplit(args.url).scheme not in ("http", "https") or not urlsplit(args.url).hostname:
+            p.error("адрес должен начинаться с http:// или https://")
+    except ValueError as exc:
+        p.error("неверный адрес %s: %s" % (args.url, exc))
     # Ошибку в пути лучше узнать сразу, а не после всего обхода
     for path in filter(None, (args.output, args.report)):
         path = os.path.expanduser(path)
@@ -1057,8 +1066,10 @@ def main():
         print("  пропущено: %s (%s)" % (url, why))
     for url in crawl["slow"]:
         print("  загрузилась не полностью, напечатано что успело: %s" % url)
+    for url, factor in result["shrunk"]:
+        print("  страница шире листа, масштаб уменьшен до %.3f, текст мельче: %s" % (factor, url))
     for url in result["clipped"]:
-        print("  ВНИМАНИЕ: %s намного шире листа, часть может быть обрезана; уменьшите --scale" % url)
+        print("  ВНИМАНИЕ: %s не поместилась по ширине даже так, часть может быть обрезана" % url)
     for src, href in crawl["areas"]:
         print("  область карты-картинки не кликается в PDF: %s -> %s" % (src, href))
     for url in broken_images:
