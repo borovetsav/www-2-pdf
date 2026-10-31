@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1306 150" role="img" aria-label="How it works: crawl, prepare, print, merge, rewrite links, one PDF" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+<defs><marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#8a93a8"/></marker></defs>
+<rect x="20" y="25" width="186" height="100" rx="14" fill="#4361EE" fill-opacity=".1" stroke="#4361EE" stroke-width="1.5"/>
+<text x="113" y="62" text-anchor="middle" font-size="19" font-weight="700" fill="#4361EE">Crawl</text>
+<text x="113" y="88" text-anchor="middle" font-size="15" fill="#8a93a8">same host and port</text>
+<line x1="209" y1="75" x2="232" y2="75" stroke="#8a93a8" stroke-width="2" marker-end="url(#a)"/>
+<rect x="236" y="25" width="186" height="100" rx="14" fill="#4361EE" fill-opacity=".1" stroke="#4361EE" stroke-width="1.5"/>
+<text x="329" y="62" text-anchor="middle" font-size="19" font-weight="700" fill="#4361EE">Prepare</text>
+<text x="329" y="88" text-anchor="middle" font-size="15" fill="#8a93a8">expand, unstick,</text>
+<text x="329" y="108" text-anchor="middle" font-size="15" fill="#8a93a8">load images</text>
+<line x1="425" y1="75" x2="448" y2="75" stroke="#8a93a8" stroke-width="2" marker-end="url(#a)"/>
+<rect x="452" y="25" width="186" height="100" rx="14" fill="#4361EE" fill-opacity=".1" stroke="#4361EE" stroke-width="1.5"/>
+<text x="545" y="62" text-anchor="middle" font-size="19" font-weight="700" fill="#4361EE">Print</text>
+<text x="545" y="88" text-anchor="middle" font-size="15" fill="#8a93a8">headless</text>
+<text x="545" y="108" text-anchor="middle" font-size="15" fill="#8a93a8">Chromium</text>
+<line x1="641" y1="75" x2="664" y2="75" stroke="#8a93a8" stroke-width="2" marker-end="url(#a)"/>
+<rect x="668" y="25" width="186" height="100" rx="14" fill="#4361EE" fill-opacity=".1" stroke="#4361EE" stroke-width="1.5"/>
+<text x="761" y="62" text-anchor="middle" font-size="19" font-weight="700" fill="#4361EE">Merge</text>
+<text x="761" y="88" text-anchor="middle" font-size="15" fill="#8a93a8">parts and</text>
+<text x="761" y="108" text-anchor="middle" font-size="15" fill="#8a93a8">bookmarks</text>
+<line x1="857" y1="75" x2="880" y2="75" stroke="#8a93a8" stroke-width="2" marker-end="url(#a)"/>
+<rect x="884" y="25" width="186" height="100" rx="14" fill="#4361EE" fill-opacity=".1" stroke="#4361EE" stroke-width="1.5"/>
+<text x="977" y="62" text-anchor="middle" font-size="19" font-weight="700" fill="#4361EE">Rewrite links</text>
+<text x="977" y="88" text-anchor="middle" font-size="15" fill="#8a93a8">page + exact</text>
+<text x="977" y="108" text-anchor="middle" font-size="15" fill="#8a93a8">coordinates</text>
+<line x1="1073" y1="75" x2="1096" y2="75" stroke="#8a93a8" stroke-width="2" marker-end="url(#a)"/>
+<rect x="1100" y="25" width="186" height="100" rx="14" fill="#2F8A4C" fill-opacity=".14" stroke="#2F8A4C" stroke-width="1.5"/>
+<text x="1193" y="70" text-anchor="middle" font-size="19" font-weight="700" fill="#2F8A4C">One PDF</text>
+<text x="1193" y="94" text-anchor="middle" font-size="15" fill="#8a93a8">works offline</text>
+</svg>

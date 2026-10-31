@@ -10,14 +10,28 @@ Click a link and you jump inside the file. Press back and you return. No interne
 ![Tested on macOS](https://img.shields.io/badge/tested%20on-macOS-000000?logo=apple&logoColor=white)
 ![Chromium](https://img.shields.io/badge/renders%20with-Chromium-4285F4?logo=googlechrome&logoColor=white)
 ![Works offline](https://img.shields.io/badge/result-works%20offline-2F8A4C)
+![Free](https://img.shields.io/badge/price-free-brightgreen)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/borovetsav/www-2-pdf?color=4361EE)](https://github.com/borovetsav/www-2-pdf/releases/latest)
+
+[![Demo: a site becomes one PDF with working links](docs/demo.gif)](docs/demo.mp4)
+
+<sub>A 30-second demo on a made-up site, animated from the real PDF. <a href="docs/demo.mp4">Watch the sharper MP4</a>.</sub>
 
 </div>
 
+## Install
+
+Download the one script and run it:
+
 ```bash
+curl -LO https://github.com/borovetsav/www-2-pdf/releases/latest/download/www2pdf.py
 python3 www2pdf.py https://example.com/ -o ~/Desktop/site.pdf
 ```
 
 That is the whole setup. On the first run the script installs its own dependencies into `~/.www2pdf`, with no `sudo`, Homebrew or wget.
+
+If www-2-pdf saved you a website, a ⭐ helps other people find it.
 
 ## When it helps
 
@@ -27,6 +41,13 @@ You have a static site and want it as a single file that keeps working:
 - **Research notes and knowledge bases** with many cross-references between pages
 - **Project and course sites** to archive before they go offline
 - **Reports and catalogs** to send as one attachment instead of a link
+
+## Screenshots
+
+<table>
+<tr><th>On the website: answers hidden behind clicks</th><th>In the PDF: everything open, with bookmarks</th></tr>
+<tr><td><img src="docs/site-view.png" alt="The site with collapsed questions"></td><td><img src="docs/pdf-view.png" alt="The PDF with expanded answers and nested bookmarks"></td></tr>
+</table>
 
 ## What you get
 
@@ -47,14 +68,7 @@ Printing a site page by page gives you a pile of files that lose their links and
 
 ## How it works
 
-```mermaid
-flowchart LR
-    A[Crawl the site<br>same host and port] --> B[Prepare each page<br>expand, unstick, load images]
-    B --> C[Print with<br>headless Chromium]
-    C --> D[Merge the parts<br>with pypdf]
-    D --> E[Rewrite every link as<br>page + exact coordinates]
-    E --> F[One offline PDF]
-```
+![How it works: crawl, prepare, print, merge, rewrite links](docs/how-it-works.svg)
 
 Every internal link becomes an explicit `[page /XYZ 0 y null]` destination. Nothing stays a named destination, so identical ids on different pages cannot collide, and PDF viewers record each jump in their history.
 
@@ -121,3 +135,7 @@ tests/run_all.sh https://example.com/ # also a real site and a PDFKit check on m
 | `tests/pdfkit_check.py` | Follows links, back and forward using PDFKit, the engine behind Preview (macOS only) |
 
 The verifier does not check text color, so review the visual result yourself. Test dependencies install into `~/.www2pdf-tests`.
+
+## License
+
+[MIT](LICENSE)
