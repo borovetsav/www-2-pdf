@@ -299,6 +299,69 @@ def hanging_font(tmp):
     server.shutdown()
 
 
+class EndlessArticles(http.server.BaseHTTPRequestHandler):
+    """A site like a large blog: every article links to more articles, hubs and the home page."""
+    fetched = []
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        self.fetched.append(path)
+        if path == "/ru/post/1":
+            self.send_response(301)
+            self.send_header("Location", "/ru/articles/1/")
+            self.end_headers()
+            return
+        number = re.match(r"/ru/articles/(\d+)/", path)
+        n = int(number.group(1)) if number else 1
+        body = page(path, '<h1>Page %s</h1><a href="/ru/articles/%d/">next</a> <a href="/ru/articles/%d/">other</a> '
+                          '<a href="/ru/hubs/x/">hub</a> <a href="/">home</a> <a href="https://example.org/">outside</a> '
+                          '<a href="/ru/articles/%d/comments/">comments</a> <a href="/blog/b.html">blog b</a>'
+                    % (path, n + 1, n * 2 + 7, n))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def crawl_limits(tmp):
+    """One article must never pull in the whole site: requests are counted on the server."""
+    def run(start, *extra):
+        handler = type("H", (EndlessArticles,), {"fetched": []})
+        server = Server(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = "http://127.0.0.1:%d" % server.server_address[1]
+        out = os.path.join(tmp, "scope.pdf")
+        result = run_tool(base + start, out, "--timeout", "20", *extra)
+        server.shutdown()
+        pages = sorted(set(handler.fetched) - {"/favicon.ico"})
+        return result, pages, [str(i.title) for i in PdfReader(out).outline if not isinstance(i, list)] if result.returncode == 0 else []
+
+    result, pages, sections = run("/ru/articles/1/")
+    check("an article stays inside itself and its subpages", result.returncode == 0 and pages == [
+        "/ru/articles/1/", "/ru/articles/1/comments/"], str(pages))
+    check("the summary says that other links were not followed", "--whole-site" in result.stdout, result.stdout[-400:])
+    result, pages, _ = run("/ru/articles/1")
+    check("an article without a trailing slash does not take its siblings", result.returncode == 0 and all(
+        p.startswith("/ru/articles/1") and not p.startswith("/ru/articles/10") for p in pages), str(pages))
+    result, pages, _ = run("/ru/post/1")
+    check("the scope follows a redirect of the start address", result.returncode == 0 and pages == [
+        "/ru/articles/1/", "/ru/articles/1/comments/", "/ru/post/1"], str(pages))
+    result, pages, _ = run("/blog/a.html")
+    check("a page with an extension covers its folder and no more", result.returncode == 0 and all(
+        p.startswith("/blog/") for p in pages) and "/blog/b.html" in pages, str(pages))
+    result, pages, sections = run("/", "--max", "5")
+    check("the home page crawls the site but obeys --max", result.returncode == 0 and len(sections) == 5
+          and "raise --max" in result.stdout, str(sections))
+    check("--max also limits requests", len(pages) <= 6, str(pages))
+    result, pages, sections = run("/ru/articles/1/", "--whole-site", "--max", "4")
+    check("--whole-site leaves the start folder, still within --max", result.returncode == 0 and len(sections) == 4 and any(
+        not p.startswith("/ru/articles/") for p in pages), str(pages))
+
+
 def index_only(tmp):
     """The server serves only /d/index.html; the /d/ directory returns 404."""
     server, base = serve({"/d/index.html": page("Index", '<a href="other.html">next</a>'),
@@ -385,6 +448,7 @@ def main():
         hanging_image(tmp)
         hanging_font(tmp)
         index_only(tmp)
+        crawl_limits(tmp)
         long_pages_vh(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

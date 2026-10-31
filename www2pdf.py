@@ -35,6 +35,7 @@ RESOURCE_EXT = {
     ".pptx", ".mp3", ".mp4", ".webm", ".ogg", ".avi", ".mov", ".woff", ".woff2",
     ".ttf", ".otf", ".eot",
 }
+PAGE_EXT = {".html", ".htm", ".xhtml", ".shtml", ".php", ".asp", ".aspx", ".jsp"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".avif"}
 PT_PER_MM = 72 / 25.4
 PT_PER_PX = 0.75
@@ -402,6 +403,24 @@ def same_site(url, root):
         return False
 
 
+def crawl_scope(url):
+    """Path prefix the crawl stays inside, so that one article does not pull in a whole site.
+
+    /docs/intro.html covers /docs/, while /articles/123 covers only itself and its subpages.
+    """
+    path = urlsplit(url).path or "/"
+    if path.endswith("/"):
+        return path
+    if posixpath.splitext(path)[1].lower() in PAGE_EXT:
+        return posixpath.dirname(path).rstrip("/") + "/"
+    return path + "/"
+
+
+def in_scope(url, scope):
+    path = urlsplit(url).path or "/"
+    return path.startswith(scope) or path == scope.rstrip("/")
+
+
 def extension(url):
     return posixpath.splitext(urlsplit(url).path)[1].lower()
 
@@ -556,6 +575,7 @@ def prepare_and_print(page, path, args, timeout_ms, loaded):
 def render_site(context, args, tmp_dir):
     """Breadth-first crawl. Each site page produces one temporary PDF."""
     root = normalize_url(args.url)
+    scope = "/" if args.whole_site else None  # set from the first page, after any redirect
     queue = deque([(root, args.url.split("#")[0])])
     seen = {root}
     sections, skipped, aliases, alias_fragments = [], [], {}, {}
@@ -564,6 +584,7 @@ def render_site(context, args, tmp_dir):
     timeout_ms = args.timeout * 1000
 
     def visit(page, url, raw):
+        nonlocal root, scope
         statuses = {}
 
         def remember_status(response):
@@ -585,8 +606,15 @@ def render_site(context, args, tmp_dir):
             skipped.append((url, "HTTP %s after redirect: %s" % (statuses["last"], page.url)))
             return
         final = normalize_url(page.url)
+        if not sections:
+            # The start address may redirect, for example from http to https
+            root = final
+            scope = scope or crawl_scope(final)
         if not same_site(final, root):
             skipped.append((url, "redirect to another site: %s" % page.url))
+            return
+        if not in_scope(final, scope):
+            skipped.append((url, "redirect outside the crawl scope: %s" % page.url))
             return
         aliases[url] = final
         final_frag = urlsplit(page.url).fragment
@@ -616,7 +644,7 @@ def render_site(context, args, tmp_dir):
                 captions = images.setdefault(target, [])
                 if link["caption"] and link["caption"] not in captions:
                     captions.append(link["caption"])
-            elif ext not in RESOURCE_EXT and target not in seen:
+            elif ext not in RESOURCE_EXT and target not in seen and in_scope(target, scope):
                 seen.add(target)
                 queue.append((target, href.split("#")[0]))
 
@@ -633,7 +661,7 @@ def render_site(context, args, tmp_dir):
         finally:
             page.close()
     return {"sections": sections, "skipped": skipped, "aliases": aliases, "alias_fragments": alias_fragments,
-            "images": images, "limit_hit": limit_hit, "slow": slow, "areas": areas}
+            "images": images, "limit_hit": limit_hit, "slow": slow, "areas": areas, "root": root, "scope": scope}
 
 
 def render_images_appendix(context, args, tmp_dir, images, root):
@@ -779,10 +807,10 @@ def build_pdf(crawl, appendix, args):
         writer.append(part["reader"], import_outline=False, excluded_fields=["/B", "/Annots"])
 
     by_url = {s["url"]: s for s in sections}
-    root = normalize_url(args.url)
+    root, scope = crawl["root"], crawl["scope"]
     stats = {
         "goto_anchor": 0, "goto_section": 0, "goto_same_page": 0, "goto_image": 0, "uri_external": 0,
-        "uri_own_kept": 0, "hidden_removed": 0, "other": 0,
+        "uri_own_kept": 0, "uri_out_of_scope": 0, "hidden_removed": 0, "other": 0,
     }
     own_kept = []
 
@@ -815,6 +843,8 @@ def build_pdf(crawl, appendix, args):
                 return goto(a[0], a[1]), "goto_image"
         part = by_url.get(target)
         if part is None:
+            if not in_scope(target, scope):
+                return None, "uri_out_of_scope"
             own_kept.append((source["url"], uri))
             return None, "uri_own_kept"
         if frag:
@@ -986,7 +1016,9 @@ def parse_args(argv):
     p.add_argument("--scale", type=float, default=0.75, help="print scale, 0.1-2 (default 0.75)")
     p.add_argument("--paper", choices=["A4", "Letter"], default="A4", help="sheet format")
     p.add_argument("--margin", type=float, default=8, help="margins in mm (default 8)")
-    p.add_argument("--max", type=int, default=500, help="maximum number of site pages")
+    p.add_argument("--max", type=int, default=100, help="maximum number of site pages (default 100)")
+    p.add_argument("--whole-site", action="store_true",
+                   help="follow links across the whole host, not only under the start address")
     p.add_argument("--long-pages", action="store_true", help="one long PDF page per site page")
     p.add_argument("--no-images", action="store_true", help="do not add the images appendix")
     p.add_argument("--chrome", help="path to a Chromium-based browser")
@@ -1017,6 +1049,14 @@ def parse_args(argv):
         if os.path.isdir(path) or not os.access(folder, os.W_OK):
             p.error("cannot write file: %s" % path)
     return args
+
+
+def print_limited(template, rows, limit=10):
+    """A big site can produce thousands of lines: the summary shows the first few."""
+    for row in rows[:limit]:
+        print(template % row)
+    if len(rows) > limit:
+        print("  ... and %d more" % (len(rows) - limit))
 
 
 def main():
@@ -1066,10 +1106,13 @@ def main():
         grouped.setdefault(href, []).append(src)
     for href in sorted(grouped):
         print("  no target: %s (links: %d)" % (href, len(grouped[href])))
-    for src, href in result["own_kept"]:
-        print("  stays a link to the internet: %s -> %s" % (src, href))
-    for url in crawl["limit_hit"]:
-        print("  left out because of --max: %s" % url)
+    print_limited("  stays a link to the internet: %s", ["%s -> %s" % item for item in result["own_kept"]])
+    if links["uri_out_of_scope"]:
+        print("  %d links lead elsewhere on this site and stay web links; only pages under %s were followed (use --whole-site for all)"
+              % (links["uri_out_of_scope"], crawl["scope"]))
+    if crawl["limit_hit"]:
+        print("  stopped at the page limit: %d more pages found, raise --max to include them" % len(crawl["limit_hit"]))
+    print_limited("  left out because of --max: %s", crawl["limit_hit"])
     for url, why in crawl["skipped"]:
         print("  skipped: %s (%s)" % (url, why))
     for url in crawl["slow"]:

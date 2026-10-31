@@ -86,7 +86,8 @@ python3 www2pdf.py URL -o OUTPUT.pdf [options]
 | `--scale 0.75` | Print scale, 0.1–2. Lower means smaller text; a high scale can trigger the site's mobile layout | `0.75` |
 | `--paper A4\|Letter` | Paper size | `A4` |
 | `--margin 8` | Margins in mm | `8` |
-| `--max 500` | Limit on the number of site pages | `500` |
+| `--max 100` | Limit on the number of site pages | `100` |
+| `--whole-site` | Follow links across the whole host, not only under the start address | off |
 | `--long-pages` | One long PDF sheet per site page | off |
 | `--no-images` | Skip the images appendix; links to images stay web links | off |
 | `--chrome PATH` | Path to a Chromium-based browser | auto-detected |
@@ -96,6 +97,18 @@ python3 www2pdf.py URL -o OUTPUT.pdf [options]
 The script uses an installed Chrome, Edge, Brave or Yandex browser, and downloads Chromium if it finds none. It needs Python 3.9 or newer. To install dependencies elsewhere, set `WWW2PDF_VENV`; a folder that contains anything other than a virtual environment's own files is never deleted.
 
 Every run ends with a summary: sheets, expanded `<details>`, anchored links, and each anchor that does not exist on the site.
+
+## What gets downloaded
+
+The crawl never leaves the start address, so converting one article cannot pull in a whole site:
+
+| You start from | What is included |
+|---|---|
+| `https://example.com/` | The whole site |
+| `https://example.com/docs/` or `/docs/intro.html` | Everything under `/docs/` |
+| `https://example.com/articles/123/` or `/articles/123` | That article and its subpages only |
+
+Other links on the same site stay regular web links, and the summary says how many. Use `--whole-site` to follow them. Either way, the crawl stops at `--max` pages and tells you how many it left out.
 
 ## Going back and forward
 
@@ -110,7 +123,9 @@ In Preview, open the bookmarks with **View → Table of Contents**.
 ## Limitations
 
 - **Static content only.** JavaScript menus that need a click are not pressed. Only the disclosures listed above are expanded.
-- **Pages must be linked.** The crawl follows `<a href>` and `<area href>`, so a page nothing links to is not included.
+- **Pages must be linked.** The crawl follows `<a href>` and `<area href>` under the start address, so a page nothing links to is not included.
+- **Made for static sites.** On a live site, cookie banners and ad slots are printed along with the content, and a banner can cover some text.
+- **No throttling.** Pages load one at a time with no extra delay. Check a site's terms before crawling it with a high `--max`.
 - **Image-map areas are not clickable.** `<area>` regions do not become links in the PDF; the summary lists them.
 - **Missing anchors go to the section start,** as in a browser, and the summary lists them. With duplicate ids, a jump goes to the first element.
 - **Only images are embedded.** Links to the site's other files, such as PDFs and archives, stay web links and appear in the summary.
