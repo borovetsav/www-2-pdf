@@ -1,6 +1,6 @@
 #!/bin/zsh
-# Полный прогон: макет на scale 0.5, 0.75, 1 и 2, режим длинных страниц и (по желанию) реальный сайт.
-# Запуск: tests/run_all.sh [адрес реального сайта]
+# Full run: mock site at scale 0.5, 0.75, 1 and 2, long-page mode and (optionally) a real site.
+# Usage: tests/run_all.sh [real site URL]
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
@@ -23,42 +23,42 @@ sleep 1
 FAILED=0
 URL="http://127.0.0.1:$PORT/"
 for SCALE in 0.5 0.75 1 2; do
-  echo "=== Макет, scale $SCALE ==="
+  echo "=== Mock site, scale $SCALE ==="
   python3 "$ROOT/www2pdf.py" "$URL" -o "$OUT/mock_$SCALE.pdf" --scale "$SCALE" 2>/dev/null | head -6
   [ "${pipestatus[1]}" = "0" ] || FAILED=1
   "$PY" "$HERE/verify.py" "$OUT/mock_$SCALE.pdf" "$URL" --markers "$OUT/site/markers.txt" --json "$OUT/mock_$SCALE.json" | tail -22
   [ "${pipestatus[1]}" = "0" ] || FAILED=1
 done
 
-echo "=== Макет, длинные страницы ==="
+echo "=== Mock site, long pages ==="
 python3 "$ROOT/www2pdf.py" "$URL" -o "$OUT/mock_long.pdf" --long-pages 2>/dev/null | head -2
 [ "${pipestatus[1]}" = "0" ] || FAILED=1
 "$PY" "$HERE/verify.py" "$OUT/mock_long.pdf" "$URL" --markers "$OUT/site/markers.txt" | tail -3
 [ "${pipestatus[1]}" = "0" ] || FAILED=1
 
-echo "=== Макет, Letter с полями 12 мм ==="
+echo "=== Mock site, Letter with 12 mm margins ==="
 python3 "$ROOT/www2pdf.py" "$URL" -o "$OUT/mock_letter.pdf" --paper Letter --margin 12 2>/dev/null | head -2
 [ "${pipestatus[1]}" = "0" ] || FAILED=1
 "$PY" "$HERE/verify.py" "$OUT/mock_letter.pdf" "$URL" --markers "$OUT/site/markers.txt" | tail -3
 [ "${pipestatus[1]}" = "0" ] || FAILED=1
 
-echo "=== Верификатор ловит испорченные PDF ==="
+echo "=== Verifier catches mutated PDFs ==="
 "$PY" "$HERE/test_mutations.py" "$OUT/mock_0.75.pdf" "$URL" "$OUT/site" || FAILED=1
 
-echo "=== Каверзные сайты ==="
+echo "=== Tricky sites ==="
 "$PY" "$HERE/test_edges.py" || FAILED=1
 
 if [ $# -ge 1 ]; then
-  echo "=== Реальный сайт: $1 ==="
-  python3 "$ROOT/www2pdf.py" "$1" -o "$OUT/real.pdf" --report "$OUT/real_tool.json" 2>/dev/null | grep -v 'нет цели'
+  echo "=== Real site: $1 ==="
+  python3 "$ROOT/www2pdf.py" "$1" -o "$OUT/real.pdf" --report "$OUT/real_tool.json" 2>/dev/null | grep -v '^  no target: '
   [ "${pipestatus[1]}" = "0" ] || FAILED=1
   "$PY" "$HERE/verify.py" "$OUT/real.pdf" "$1" --json "$OUT/real.json"
   [ $? = 0 ] || FAILED=1
   if [ "$(uname)" = "Darwin" ]; then
-    echo "=== PDFKit (движок Preview) ==="
+    echo "=== PDFKit (Preview engine) ==="
     "$PY" "$HERE/pdfkit_check.py" "$OUT/real.pdf" || FAILED=1
   fi
 fi
 
-if [ "$FAILED" = "0" ]; then echo "ИТОГ: все проверки прошли"; else echo "ИТОГ: ЕСТЬ ОШИБКИ"; fi
+if [ "$FAILED" = "0" ]; then echo "RESULT: all checks passed"; else echo "RESULT: THERE ARE ERRORS"; fi
 exit $FAILED

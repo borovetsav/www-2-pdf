@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Проверка самого верификатора: каждая порча PDF или сайта должна дать ненулевой код.
+"""Tests the verifier itself: every mutation of the PDF or the site must produce a non-zero exit code.
 
-Запуск: python test_mutations.py исходный.pdf http://адрес_макета/ каталог_макета
+Usage: python test_mutations.py source.pdf http://mock_site_address/ mock_site_dir
 """
 import http.server
 import os
@@ -22,7 +22,7 @@ VERIFY = os.path.join(HERE, "verify.py")
 
 
 def annots(writer, kind=None):
-    """Все ссылки как (лист, аннотация, действие). kind: goto или uri."""
+    """All links as (sheet, annotation, action). kind: goto or uri."""
     result = []
     for i, page in enumerate(writer.pages):
         for ref in page.get("/Annots") or []:
@@ -34,7 +34,7 @@ def annots(writer, kind=None):
 
 
 def anchored(writer):
-    """Ссылки на якорь: y заметно ниже верха листа."""
+    """Links to an anchor: y is well below the top of the sheet."""
     return [(i, a, d) for i, a, d in annots(writer, "goto") if float(d["/D"][3]) < 780 and float(a["/Rect"][2]) - float(a["/Rect"][0]) > 5]
 
 
@@ -76,7 +76,7 @@ def external_to_goto(writer):
 
 def change_uri(writer):
     _, _, d = annots(writer, "uri")[0]
-    d[NameObject("/URI")] = TextStringObject("https://example.com/другое")
+    d[NameObject("/URI")] = TextStringObject("https://example.com/other")
 
 
 def named_dest(writer):
@@ -86,7 +86,7 @@ def named_dest(writer):
 
 def change_contents(writer):
     links = [x for x in anchored(writer) if x[1].get("/Contents")]
-    links[0][1][NameObject("/Contents")] = TextStringObject("ПОДМЕНА")
+    links[0][1][NameObject("/Contents")] = TextStringObject("TAMPERED")
 
 
 def drop_contents(writer):
@@ -108,7 +108,7 @@ def crop(writer):
 
 
 def outline_items(writer):
-    """Плоский список закладок записи: (родитель-раздел или нет, словарь)."""
+    """Flat list of bookmarks: (parent section or not, dictionary)."""
     result = []
 
     def walk(node, depth):
@@ -150,29 +150,29 @@ def image_section_shift(writer):
 
 
 PDF_MUTATIONS = [
-    ("сдвиг ссылки вверх на 30 pt", partial(shift_link, dy=30)),
-    ("сдвиг ссылки вверх на 80 pt", partial(shift_link, dy=80)),
-    ("сдвиг ссылки вниз на 40 pt", partial(shift_link, dy=-40)),
-    ("left не 0", partial(set_dest_item, position=2, value=FloatObject(10))),
-    ("zoom не null", partial(set_dest_item, position=4, value=FloatObject(2))),
-    ("якорь ведёт на начало листа", to_section_start),
-    ("обмен целями у двух ссылок", swap_targets),
-    ("ссылка удалена", remove_link),
-    ("внешняя стала GoTo", external_to_goto),
-    ("внешняя ведёт на другой адрес", change_uri),
-    ("именованное назначение", named_dest),
-    ("подсказка подменена", change_contents),
-    ("подсказка удалена", drop_contents),
-    ("два листа людей переставлены", partial(swap_sheets, a=8, b=9)),
-    ("два листа источников переставлены", partial(swap_sheets, a=27, b=28)),
-    ("пустой лист", blank_sheet),
-    ("лист обрезан через CropBox", crop),
-    ("закладка человека сдвинута", partial(shift_bookmark, depth=3, dy=60)),
-    ("закладка h1 сдвинута к шапке", partial(shift_bookmark, depth=1, dy=30, nth=1)),
-    ("закладка раздела сдвинута", partial(shift_bookmark, depth=0, dy=-200, nth=1)),
-    ("у закладки раздела left не 0", section_left),
-    ("закладки поменялись заголовками", swap_bookmark_titles),
-    ("закладка приложения сдвинута", image_section_shift),
+    ("link shifted up by 30 pt", partial(shift_link, dy=30)),
+    ("link shifted up by 80 pt", partial(shift_link, dy=80)),
+    ("link shifted down by 40 pt", partial(shift_link, dy=-40)),
+    ("left is not 0", partial(set_dest_item, position=2, value=FloatObject(10))),
+    ("zoom is not null", partial(set_dest_item, position=4, value=FloatObject(2))),
+    ("anchor points to the top of the sheet", to_section_start),
+    ("two links swapped targets", swap_targets),
+    ("link removed", remove_link),
+    ("external link became GoTo", external_to_goto),
+    ("external link points to another address", change_uri),
+    ("named destination", named_dest),
+    ("tooltip replaced", change_contents),
+    ("tooltip removed", drop_contents),
+    ("two entry sheets swapped", partial(swap_sheets, a=8, b=9)),
+    ("two sources sheets swapped", partial(swap_sheets, a=27, b=28)),
+    ("blank sheet", blank_sheet),
+    ("sheet cropped via CropBox", crop),
+    ("entry bookmark shifted", partial(shift_bookmark, depth=3, dy=60)),
+    ("h1 bookmark shifted towards the site header", partial(shift_bookmark, depth=1, dy=30, nth=1)),
+    ("section bookmark shifted", partial(shift_bookmark, depth=0, dy=-200, nth=1)),
+    ("section bookmark left is not 0", section_left),
+    ("bookmarks swapped titles", swap_bookmark_titles),
+    ("images appendix bookmark shifted", image_section_shift),
 ]
 
 
@@ -197,10 +197,10 @@ def serve(folder):
 
 
 def site_with(tmp, site, name, edit):
-    """Копия макета с правкой: PDF собран без этого текста, значит, он «потерян»."""
+    """Copy of the mock site with an edit: the PDF was built without this text, so it counts as lost."""
     copy = os.path.join(tmp, name)
     shutil.copytree(site, copy)
-    path = os.path.join(copy, "mama.html")
+    path = os.path.join(copy, "part1.html")
     with open(path, encoding="utf-8") as f:
         html = f.read()
     changed = edit(html)
@@ -218,48 +218,48 @@ def main():
     try:
         control = run_verify(source, url, markers)
         if control.returncode != 0:
-            print("ОШИБКА контроль без порчи не прошёл:\n" + control.stdout[-800:])
+            print("FAIL control run without mutation did not pass:\n" + control.stdout[-800:])
             return 1
-        print("ок   контроль без порчи: код 0")
+        print("ok   control run without mutation: exit code 0")
         for name, mutate in PDF_MUTATIONS:
             writer = PdfWriter(clone_from=source)
             try:
                 mutate(writer)
             except Exception as exc:
-                print("ОШИБКА порча не применилась: %s (%r)" % (name, exc))
+                print("FAIL mutation did not apply: %s (%r)" % (name, exc))
                 failures.append(name)
                 continue
             path = os.path.join(tmp, "m.pdf")
             writer.write(path)
             caught = run_verify(path, url, markers).returncode != 0
-            print("%s %s" % ("ок  " if caught else "ПРОПУЩЕНО", name))
+            print("%s %s" % ("ok  " if caught else "MISSED", name))
             if not caught:
                 failures.append(name)
 
-        # Сайт содержит текст, которого нет в PDF: потерянный текст, в том числе повторяющийся
-        paragraph = "<p>Дубль-блок для проверки потери текста</p>"
+        # The site contains text missing from the PDF: lost text, including repeated text
+        paragraph = "<p>Duplicate block for the text loss check</p>"
         site_cases = [
-            ("уникальный абзац в details потерян", lambda h: h.replace('<div class="info">', '<div class="info">' + paragraph, 1)),
-            ("один из повторяющихся абзацев потерян", lambda h: h.replace('<div class="info"><p>', '<div class="info"><p>Подробный текст для объёма, чтобы вёрстка занимала много листов и якоря попадали в разные места страницы при любом масштабе. </p><p>', 1)),
+            ("unique paragraph in details lost", lambda h: h.replace('<div class="info">', '<div class="info">' + paragraph, 1)),
+            ("one of the repeated paragraphs lost", lambda h: h.replace('<div class="info"><p>', '<div class="info"><p>Detailed filler text that keeps the layout long enough so that anchors land in different places on the sheet at any scale. </p><p>', 1)),
         ]
         for n, (name, edit) in enumerate(site_cases):
             copy = site_with(tmp, site, "site%d" % n, edit)
             server, copy_url = serve(copy)
-            # Адреса страниц в PDF не важны, сравнивается текст и цели по заголовкам
-            caught = "текст потерян" in run_verify(source, copy_url).stdout
+            # Page addresses in the PDF do not matter: text and heading targets are compared
+            caught = "text lost" in run_verify(source, copy_url).stdout
             server.shutdown()
-            print("%s %s" % ("ок  " if caught else "ПРОПУЩЕНО", name))
+            print("%s %s" % ("ok  " if caught else "MISSED", name))
             if not caught:
                 failures.append(name)
 
         unreachable = run_verify(source, "http://127.0.0.1:9/")
         caught = unreachable.returncode != 0
-        print("%s сайт не отвечает" % ("ок  " if caught else "ПРОПУЩЕНО"))
+        print("%s site does not respond" % ("ok  " if caught else "MISSED"))
         if not caught:
-            failures.append("сайт не отвечает")
+            failures.append("site does not respond")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("ИТОГ: %s" % ("все порчи пойманы" if not failures else "ПРОПУЩЕНО %d: %s" % (len(failures), failures)))
+    print("RESULT: %s" % ("all mutations caught" if not failures else "MISSED %d: %s" % (len(failures), failures)))
     return 1 if failures else 0
 
 

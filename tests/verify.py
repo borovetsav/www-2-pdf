@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Верификатор PDF. Ожидания берёт из самого сайта, а не из www2pdf.py.
+"""PDF verifier. Takes its expectations from the site itself, not from www2pdf.py.
 
-Для каждой ссылки в PDF: текст под ней сверяется с видимым текстом ссылки на сайте,
-порядок ссылок с одинаковым текстом должен совпадать с сайтом, а ожидаемая запись
-(ФИО из summary, код и заголовок источника) должна стоять у самой точки перехода.
-Также проверяются форма назначений, весь текст страниц (в том числе скрытый), порядок листов,
-закладки поэлементно, подсказки /Contents, пустые и обрезанные листы, выход текста за лист.
+For each link in the PDF: the text under it is compared with the visible link text on the site,
+links with identical text must keep the site's order, and the expected entry
+(full name from summary, source code and title) must sit right at the jump target.
+Also checks destination form, all page text (including hidden text), sheet order,
+bookmarks one by one, /Contents tooltips, blank and cropped sheets, text overflowing the sheet.
 
-Не проверяется: цвет текста (белый на белом пройдёт). Внешний вид смотрят глазами.
+Not checked: text color (white on white passes). Appearance is checked by eye.
 
-Запуск: python verify.py файл.pdf http://сайт/ [--markers markers.txt] [--json отчёт.json]
-Код возврата 0 только если нет ни одного расхождения.
+Usage: python verify.py file.pdf SITE_URL [--markers markers.txt] [--json report.json]
+Exit code is 0 only if there are no discrepancies.
 """
 import argparse
 import hashlib
@@ -31,16 +31,16 @@ from pypdf import PdfReader
 from pypdf.generic import ArrayObject, NullObject
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".avif"}
-TOP_TOLERANCE = 3  # допуск в pt: глиф может начинаться чуть выше точки перехода
-LINE_TOLERANCE = 6  # символы ближе этого по вертикали считаем одной строкой
+TOP_TOLERANCE = 3  # tolerance in pt: a glyph may start slightly above the jump target
+LINE_TOLERANCE = 6  # characters vertically closer than this count as one line
 HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-MIN_ORDER_NODE = 5  # короче этого узел может случайно оказаться частью другого текста
+MIN_ORDER_NODE = 5  # a node shorter than this may happen to be part of other text
 NON_TEXT_TAGS = {"script", "style", "noscript", "template", "head", "title"}
 
 
 def norm(text):
-    """Сравниваем без пробелов и дефисов: pdfplumber отдаёт дефис из шрифтов Chrome как U+E088."""
-    text = unicodedata.normalize("NFKC", text or "")  # лигатуры шрифта: ﬁ -> fi
+    """Compare without whitespace and hyphens: pdfplumber returns the hyphen from Chrome fonts as U+E088."""
+    text = unicodedata.normalize("NFKC", text or "")  # font ligatures: ﬁ -> fi
     return re.sub(r"[\s\-‐-―­]+", "", text)
 
 
@@ -62,12 +62,12 @@ def page_key(url):
 
 
 def destination_form(item):
-    """Закладка должна быть вида /XYZ 0 y null."""
+    """A bookmark must have the form /XYZ 0 y null."""
     return str(item["/Type"]) == "/XYZ" and float(item.left) == 0 and isinstance(item.zoom, (NullObject, type(None)))
 
 
 def expected_text(el):
-    """Строка, которая должна стоять у точки перехода на этот элемент."""
+    """The line that must sit at the jump target for this element."""
     summary = el if el.name == "summary" else el.find("summary")
     if summary is not None:
         bold = summary.find("b")
@@ -76,7 +76,7 @@ def expected_text(el):
 
 
 def visible_strings(root):
-    """Все текстовые узлы в порядке документа, включая скрытые блоки."""
+    """All text nodes in document order, including hidden blocks."""
     result = []
     for node in root.find_all(string=True):
         if type(node).__name__ != "NavigableString":
@@ -90,7 +90,7 @@ def visible_strings(root):
 
 
 def expected_bookmarks(soup):
-    """Заголовки h1–h3 и summary в порядке документа, как в оглавлении PDF."""
+    """h1–h3 headings and summary elements in document order, as in the PDF outline."""
     titles = []
     for el in soup.find_all(["h1", "h2", "h3", "summary"]):
         if el.name != "summary" and el.find_parent("summary"):
@@ -102,7 +102,7 @@ def expected_bookmarks(soup):
 
 
 class Site:
-    """Обход сайта стандартными средствами, независимо от браузера и от www2pdf.py."""
+    """Crawls the site with standard tools, independently of the browser and www2pdf.py."""
 
     def __init__(self, root):
         self.root = root
@@ -113,17 +113,17 @@ class Site:
             url = queue.pop(0)
             try:
                 html, ctype = fetch(url)
-            except urllib.error.HTTPError:  # битая ссылка на сайте, это не ошибка проверки
+            except urllib.error.HTTPError:  # a broken link on the site is not a verification error
                 continue
             except OSError as exc:
-                raise SystemExit("ОШИБКА: сайт не ответил, проверка невозможна: %s (%s)" % (url, exc))
+                raise SystemExit("ERROR: site did not respond, cannot verify: %s (%s)" % (url, exc))
             if "html" not in ctype:
                 continue
             soup = BeautifulSoup(html, "html.parser")
             key = page_key(url)
             ids = {}
             for el in soup.find_all(id=True):
-                ids.setdefault(el["id"], el)  # при повторах браузер идёт на первый
+                ids.setdefault(el["id"], el)  # with duplicates the browser goes to the first one
             for el in soup.find_all("a", attrs={"name": True}):
                 ids.setdefault(el["name"], el)
             links = []
@@ -143,7 +143,7 @@ class Site:
             self.pages[key] = {"url": url, "soup": soup, "ids": ids, "links": links,
                                "title": soup.title.get_text().strip() if soup.title else ""}
         if not self.pages:
-            raise SystemExit("ОШИБКА: на сайте не найдено ни одной страницы, проверка невозможна: %s" % root)
+            raise SystemExit("ERROR: no pages found on the site, cannot verify: %s" % root)
 
     def is_own(self, href):
         a, b = urlsplit(href), urlsplit(self.root)
@@ -157,7 +157,7 @@ class Pdf:
         self.page_index = {p.indirect_reference.idnum: i for i, p in enumerate(self.reader.pages)}
         self.chars = {}
         self.shas = {}
-        # Допуски рассчитаны на кегль около 9 pt, на крупном масштабе всё пропорционально больше
+        # Tolerances assume a font size of about 9 pt; at larger scales everything grows proportionally
         sizes = sorted(c["size"] for p in self.plumber.pages[:5] for c in p.chars[:2000]) or [9]
         self.zoom = max(1.0, sizes[len(sizes) // 2] / 9)
 
@@ -189,7 +189,7 @@ class Pdf:
         return float(self.reader.pages[index].mediabox.height)
 
     def first_line(self, index):
-        """Первая строка листа: на первом листе раздела это обычно шапка сайта."""
+        """First line of the sheet: on the first sheet of a section this is usually the site header."""
         chars = [c for c in self.page_chars(index) if norm(c["text"])]
         if not chars:
             return ""
@@ -197,7 +197,7 @@ class Pdf:
         return norm("".join(c["text"] for c in chars if c["top"] - top <= LINE_TOLERANCE * self.zoom))
 
     def landing(self, index, y, want, window, tight, heading=False, header=""):
-        """Проверяет, что want стоит сразу у точки перехода. Возвращает (разрыв в pt, причина ошибки)."""
+        """Checks that want sits right at the jump target. Returns (gap in pt, failure reason)."""
         top = self.height(index) - y
         window, tight = window * self.zoom, tight * self.zoom
         chars = [c for c in self.page_chars(index) if top - TOP_TOLERANCE <= c["top"] <= top + window]
@@ -205,7 +205,7 @@ class Pdf:
         joined = "".join(pieces)
         at = joined.find(want)
         if at < 0:
-            return None, "нет ожидаемого текста %r" % want
+            return None, "expected text not found: %r" % want
         position, start = 0, None
         for char, piece in zip(chars, pieces):
             if position >= at and piece:
@@ -214,20 +214,20 @@ class Pdf:
             position += len(piece)
         gap = max(0, start["top"] - top)
         if gap > tight:
-            return gap, "запись на %.1f pt ниже точки перехода" % gap
+            return gap, "entry is %.1f pt below the jump target" % gap
         first_top = min(c["top"] for c, piece in zip(chars, pieces) if piece)
         if start["top"] - first_top > LINE_TOLERANCE * self.zoom:
-            return gap, "над записью стоит другой текст"
+            return gap, "other text sits above the entry"
         if heading:
             line = norm("".join(c["text"] for c in chars if abs(c["top"] - start["top"]) <= LINE_TOLERANCE * self.zoom))
             if header and line == header and line != want:
-                return gap, "переход встал на шапку сайта, а не на заголовок"
+                return gap, "jump landed on the site header, not the heading"
             if joined.count(want) > 1:
-                return gap, "такой же текст ниже: переход встал не на заголовок"
+                return gap, "same text further down: jump did not land on the heading"
         return gap, None
 
     def text_under(self, index, rect):
-        """Слово считаем «под ссылкой» по центру символа: запятая вылезает за прямоугольник."""
+        """A character counts as under the link by its center: a comma can stick out of the rectangle."""
         height = self.height(index)
         x0, y0, x1, y1 = rect
         top, bottom = height - max(y0, y1), height - min(y0, y1)
@@ -245,7 +245,7 @@ class Pdf:
         return result
 
     def explicit_target(self, dest):
-        """Только [page_ref /XYZ 0 y null] с y в пределах листа -> (номер листа, y)."""
+        """Only [page_ref /XYZ 0 y null] with y within the sheet -> (sheet number, y)."""
         if not isinstance(dest, ArrayObject) or len(dest) != 5:
             return None
         idnum = getattr(list.__getitem__(dest, 0), "idnum", None)
@@ -268,7 +268,7 @@ def walk_outline(items, out):
 
 
 def top_level_sections(pdf):
-    """Разделы PDF по закладкам верхнего уровня: (заголовок, первый лист, вложенные закладки)."""
+    """PDF sections from top-level bookmarks: (title, first sheet, nested bookmarks)."""
     sections = []
     items = pdf.reader.outline
     for i, item in enumerate(items):
@@ -282,7 +282,7 @@ def top_level_sections(pdf):
 
 
 def collect_pdf_links(pdf, first, last):
-    """Прямоугольники ссылок раздела в порядке документа."""
+    """Link rectangles of a section in document order."""
     links = []
     for index in range(first, last):
         for a in pdf.annotations(index):
@@ -305,27 +305,27 @@ def collect_pdf_links(pdf, first, last):
 
 
 def check_link(pdf, site, link, cand, args, section_by_title, counts, missing_list, gaps):
-    """Проверяет, что ссылка PDF ведёт туда же, куда её пара на сайте. Возвращает причину ошибки."""
+    """Checks that a PDF link goes where its site counterpart goes. Returns the failure reason."""
     href = cand["href"]
     if not cand["own"]:
         if link["kind"] == "uri" and unquote(link["uri"]) == unquote(href):
             counts["external_uri"] += 1
             return None
-        return "внешняя ссылка изменилась"
+        return "external link changed"
     if link["kind"] != "goto" or not link.get("target"):
-        return "не GoTo вида [лист /XYZ 0 y null]"
+        return "not a GoTo of the form [sheet /XYZ 0 y null]"
     index, y = link["target"]
     if posixpath.splitext(urlsplit(href).path)[1].lower() in IMAGE_EXT:
-        # Перешли на лист приложения, где лежит именно этот файл (JPEG хранится побайтно)
+        # Jumped to the images appendix sheet holding this exact file (JPEG is stored byte for byte)
         if link["text"] != "" or not pdf.page_has_image(index, href):
-            return "на листе нет этой картинки"
+            return "this image is not on the sheet"
         if pdf.height(index) - y > args.window * pdf.zoom:
-            return "переход не к верху листа с картинкой"
+            return "jump is not to the top of the image sheet"
         counts["image_goto"] += 1
         return None
     target_key = page_key(href)
     if target_key not in section_by_title:
-        return "нет раздела для цели"
+        return "no section for the target"
     first, last = section_by_title[target_key]
     frag = urlsplit(href).fragment
     target_page = site.pages[target_key]
@@ -333,7 +333,7 @@ def check_link(pdf, site, link, cand, args, section_by_title, counts, missing_li
     if frag and element is not None:
         want = expected_text(element)
         if not first <= index < last:
-            return "цель в чужом разделе"
+            return "target is in another section"
         gap, why = pdf.landing(index, y, want, args.window, args.tight, element.name in HEADINGS, pdf.first_line(first))
         if why:
             return why
@@ -341,7 +341,7 @@ def check_link(pdf, site, link, cand, args, section_by_title, counts, missing_li
         counts["anchor_exact"] += 1
         return None
     if index != first or not pdf.height(index) - 1 <= y <= pdf.height(index):
-        return "ожидалось начало раздела"
+        return "expected the start of the section"
     if frag:
         counts["anchor_missing_to_section"] += 1
         missing_list.append("%s#%s" % (urlsplit(href).path.lstrip("/"), frag))
@@ -369,7 +369,7 @@ def check_links(pdf, site, args, section_by_title, report, problems):
                 tiny += 1
             text = link["text"]
             used = 1
-            # Ссылка на несколько строк даёт несколько прямоугольников с одной целью
+            # A link spanning several lines produces several rectangles with one target
             while not pending.get(text) and i + used < len(pdf_links):
                 nxt = pdf_links[i + used]
                 if nxt.get("raw") != link.get("raw") or nxt.get("uri") != link.get("uri"):
@@ -380,7 +380,7 @@ def check_links(pdf, site, args, section_by_title, report, problems):
                 unexplained.append((sp["url"], link["page"] + 1, link["text"], link.get("raw") or link.get("uri")))
                 i += 1
                 continue
-            # Пара строго первая по порядку: ссылки с одинаковым текстом не могут поменяться целями
+            # Strictly the first match in order: links with identical text cannot swap targets
             cand = pending[text].pop(0)
             why = check_link(pdf, site, link, cand, args, section_by_title, counts, missing_list, gaps)
             if why:
@@ -388,7 +388,7 @@ def check_links(pdf, site, args, section_by_title, report, problems):
                                "why": why, "goto": str(link.get("target"))})
             rects = pdf_links[i:i + used]
             i += used
-            # Ссылка с картинкой внутри текста даёт ещё и пустой прямоугольник с той же целью
+            # A link with an image inside its text also produces an empty rectangle with the same target
             while i < len(pdf_links) and pdf_links[i]["text"] == "" and pdf_links[i].get("raw") == link.get("raw"):
                 rects.append(pdf_links[i])
                 i += 1
@@ -398,24 +398,24 @@ def check_links(pdf, site, args, section_by_title, report, problems):
                 counts["title_in_contents"] += 1
         for lst in pending.values():
             for lost in lst:
-                problems.append("ссылка с сайта не найдена в PDF: %s -> %s (%r)" % (sp["url"], lost["href"], lost["text"]))
+                problems.append("site link not found in PDF: %s -> %s (%r)" % (sp["url"], lost["href"], lost["text"]))
     report["links"] = dict(counts)
     report["missing_anchors_on_site"] = sorted(set(missing_list))
     report["missing_anchor_links"] = len(missing_list)
     report["misses"] = len(misses)
     report["max_gap_to_target_pt"] = round(max(gaps), 1) if gaps else None
     if misses:
-        problems.append("переходы мимо цели: %d, примеры: %s" % (len(misses), json.dumps(misses[:8], ensure_ascii=False)))
+        problems.append("jumps missing their target: %d, examples: %s" % (len(misses), json.dumps(misses[:8], ensure_ascii=False)))
     if unexplained:
-        problems.append("ссылки PDF без пары на сайте: %d, примеры: %s" % (len(unexplained), unexplained[:8]))
+        problems.append("PDF links with no site counterpart: %d, examples: %s" % (len(unexplained), unexplained[:8]))
     if wrong_contents:
-        problems.append("подсказка /Contents не совпадает с title: %d, примеры: %s" % (len(wrong_contents), wrong_contents[:5]))
+        problems.append("/Contents tooltip does not match title: %d, examples: %s" % (len(wrong_contents), wrong_contents[:5]))
     if tiny:
-        problems.append("остались служебные крошечные ссылки: %d" % tiny)
+        problems.append("leftover tiny probe links: %d" % tiny)
 
 
 class SectionText:
-    """Текст раздела одной строкой и для каждого символа его лист и положение по x."""
+    """Section text as one string, plus the sheet and x position of each character."""
 
     def __init__(self, pdf, first, last):
         pieces, self.sheets, self.xs = [], [], []
@@ -429,10 +429,10 @@ class SectionText:
 
 
 def consume(stream, text):
-    """Убирает из потока одно вхождение text. Возвращает новый поток или None.
+    """Removes one occurrence of text from the stream. Returns the new stream or None.
 
-    Строка таблицы на два листа разорвана в потоке текстом соседней ячейки, поэтому
-    допускаем до четырёх кусков длиной от 8 символов.
+    A table row spanning two sheets is split in the stream by text from a neighboring cell, so
+    up to four pieces of at least 8 characters are allowed.
     """
     if text in stream:
         return stream.replace(text, "\0", 1)
@@ -450,11 +450,11 @@ def consume(stream, text):
 
 
 def check_text(pdf, site, args, section_by_title, report, problems):
-    """Весь текст страниц, включая скрытый, должен быть в своём разделе PDF столько же раз, сколько на сайте.
+    """All page text, including hidden text, must appear in its PDF section as many times as on the site.
 
-    Каждый узел забирает своё вхождение из потока, начиная с длинных: так короткий узел не
-    засчитается за счёт длинного, в который он входит. Порядок здесь не сравнивается:
-    колонки Chrome печатает лист за листом вперемешку. Узлы короче 8 символов не проверяются.
+    Each node takes its own occurrence from the stream, longest first, so a short node is not
+    counted against a longer one that contains it. Order is not compared here:
+    Chrome prints columns interleaved sheet by sheet. Nodes shorter than 8 characters are not checked.
     """
     total = lost_total = 0
     details_total = details_ok = 0
@@ -483,8 +483,8 @@ def check_text(pdf, site, args, section_by_title, report, problems):
         for d in sp["soup"].find_all("details"):
             details_total += 1
             details_ok += not any(id(n) in lost_nodes for _, n in visible_strings(d))
-        # Порядок листов: узлы левой колонки и полной ширины не могут идти назад по листам.
-        # Правую колонку не смотрим: она начинается снова с первого листа сетки.
+        # Sheet order: left-column and full-width nodes cannot go backwards across sheets.
+        # The right column is skipped: it starts again from the first sheet of the grid.
         half = float(pdf.plumber.pages[first].width) / 2
         counts = Counter(text for text, _ in strings)
         latest = first
@@ -499,13 +499,13 @@ def check_text(pdf, site, args, section_by_title, report, problems):
             latest = max(latest, section.sheets[at])
     report["order_errors"] = len(order_errors)
     if order_errors:
-        problems.append("листы не по порядку: %d, примеры: %s" % (len(order_errors), order_errors[:5]))
+        problems.append("sheets out of order: %d, examples: %s" % (len(order_errors), order_errors[:5]))
     report["text_nodes_site"] = total
     report["text_nodes_lost"] = lost_total
     report["details_site"] = details_total
     report["details_in_pdf"] = details_ok
     if lost_total:
-        problems.append("текст потерян: %d, примеры: %s" % (lost_total, examples))
+        problems.append("text lost: %d, examples: %s" % (lost_total, examples))
     if args.markers:
         joined = "".join(all_text)
         markers = [m.strip() for m in open(args.markers, encoding="utf-8") if m.strip()]
@@ -513,7 +513,7 @@ def check_text(pdf, site, args, section_by_title, report, problems):
         report["markers"] = len(markers)
         report["markers_found"] = len(markers) - len(missing)
         if missing:
-            problems.append("не найдены маркеры: %s" % missing[:10])
+            problems.append("markers not found: %s" % missing[:10])
 
 
 def check_bookmarks(pdf, site, sections, args, section_by_title, report, problems):
@@ -527,7 +527,7 @@ def check_bookmarks(pdf, site, sections, args, section_by_title, report, problem
         want_titles = expected_bookmarks(sp["soup"])
         got_titles = [clean(str(c.title)) for c in children]
         if [norm(t) for t in want_titles] != [norm(t) for t in got_titles]:
-            bad.append((sp["title"], "список закладок не совпадает с сайтом: %d и %d" % (len(got_titles), len(want_titles))))
+            bad.append((sp["title"], "bookmark list does not match the site: %d vs %d" % (len(got_titles), len(want_titles))))
             continue
         previous = None
         headings = sp["soup"].find_all(["h1", "h2", "h3"])
@@ -535,17 +535,17 @@ def check_bookmarks(pdf, site, sections, args, section_by_title, report, problem
         for item in children:
             index = pdf.reader.get_destination_page_number(item)
             y = float(item.top)
-            # Закладки идут по документу: так видно перепутанные и выпавшие листы
+            # Bookmarks follow the document: this exposes shuffled and dropped sheets
             if previous and (index, -y) < (previous[0], -previous[1] - 1):
-                bad.append((str(item.title)[:50], "закладка выше предыдущей: лист %d" % (index + 1)))
+                bad.append((str(item.title)[:50], "bookmark above the previous one: sheet %d" % (index + 1)))
             previous = (index, y)
             if not destination_form(item):
-                bad.append((str(item.title)[:50], "форма назначения"))
+                bad.append((str(item.title)[:50], "destination form"))
                 continue
             title = norm(str(item.title))
             _, why = pdf.landing(index, y, title[:25], args.window, args.tight, title in heading_titles, pdf.first_line(first))
             if why:
-                bad.append((str(item.title)[:50], "лист %d: %s" % (index + 1, why)))
+                bad.append((str(item.title)[:50], "sheet %d: %s" % (index + 1, why)))
     site_titles = {sp["title"] for sp in site.pages.values()}
     for title, first, item, children in sections:
         if title not in site_titles:
@@ -555,27 +555,27 @@ def check_bookmarks(pdf, site, sections, args, section_by_title, report, problem
     report["bookmarks_total"] = total
     report["bookmarks_bad"] = len(bad)
     if bad:
-        problems.append("закладки с ошибкой: %d, примеры: %s" % (len(bad), bad[:8]))
+        problems.append("bad bookmarks: %d, examples: %s" % (len(bad), bad[:8]))
 
 
 def check_section_bookmark(pdf, item, first, bad):
     if not destination_form(item):
-        bad.append((str(item.title), "форма назначения у закладки раздела"))
+        bad.append((str(item.title), "destination form of the section bookmark"))
     if not pdf.height(first) - 1 <= float(item.top) <= pdf.height(first):
-        bad.append((str(item.title), "закладка раздела не у верха листа"))
+        bad.append((str(item.title), "section bookmark is not at the top of the sheet"))
 
 
 def check_image_bookmarks(pdf, site, children, args, bad):
-    """Закладка картинки стоит у верха своего листа, а подпись называет запись, где эта картинка на сайте."""
+    """An image bookmark sits at the top of its sheet, and its caption names the entry holding that image on the site."""
     by_sha = {pdf.file_sha(h): h for h in site.image_heads if h.lower().endswith((".jpg", ".jpeg"))}
     previous = -1
     for item in children:
         index = pdf.reader.get_destination_page_number(item)
         if not destination_form(item):
-            bad.append((str(item.title)[:50], "форма назначения"))
+            bad.append((str(item.title)[:50], "destination form"))
             continue
         if index <= previous:
-            bad.append((str(item.title)[:50], "картинки не по порядку"))
+            bad.append((str(item.title)[:50], "images out of order"))
         previous = index
         _, why = pdf.landing(index, float(item.top), norm(str(item.title))[:25], args.window, args.tight)
         if why:
@@ -583,17 +583,17 @@ def check_image_bookmarks(pdf, site, children, args, bad):
         for image in pdf.page_images(index):
             href = by_sha.get(hashlib.sha1(image._data).hexdigest())
             if href and not all(h in norm(str(item.title)) for h in site.image_heads[href]):
-                bad.append((str(item.title)[:50], "подпись не от этой картинки: %s" % href))
+                bad.append((str(item.title)[:50], "caption does not belong to this image: %s" % href))
 
 
 def check_sheets(pdf, report, problems):
-    """Пустых листов нет, текст не выходит за лист и не сжат до нечитаемого."""
+    """No blank sheets; text does not overflow the sheet and is not shrunk until unreadable."""
     blank, cropped, outside, microscopic = [], [], 0, 0
     for index, page in enumerate(pdf.plumber.pages):
         chars = pdf.page_chars(index)
         if not chars and not pdf.page_images(index):
             blank.append(index + 1)
-        # Просмотрщик показывает CropBox: лист не должен быть обрезан или повёрнут
+        # Viewers display the CropBox: the sheet must not be cropped or rotated
         source = pdf.reader.pages[index]
         if list(map(float, source.cropbox)) != list(map(float, source.mediabox)) or source.get("/Rotate", 0):
             cropped.append(index + 1)
@@ -605,13 +605,13 @@ def check_sheets(pdf, report, problems):
     report["sheets"] = len(pdf.plumber.pages)
     report["blank_sheets"] = blank
     if blank:
-        problems.append("пустые листы: %s" % blank[:10])
+        problems.append("blank sheets: %s" % blank[:10])
     if cropped:
-        problems.append("обрезанные или повёрнутые листы: %s" % cropped[:10])
+        problems.append("cropped or rotated sheets: %s" % cropped[:10])
     if outside:
-        problems.append("символов за пределами листа: %d" % outside)
+        problems.append("characters outside the sheet: %d" % outside)
     if microscopic:
-        problems.append("символов с кеглем меньше 1 pt: %d" % microscopic)
+        problems.append("characters with font size below 1 pt: %d" % microscopic)
 
 
 def main():
@@ -619,12 +619,12 @@ def main():
     ap.add_argument("pdf")
     ap.add_argument("site")
     ap.add_argument("--markers")
-    ap.add_argument("--window", type=float, default=45, help="где искать запись ниже точки перехода, pt")
-    ap.add_argument("--tight", type=float, default=20, help="как далеко может начинаться запись, pt")
+    ap.add_argument("--window", type=float, default=45, help="how far below the jump target to look for the entry, pt")
+    ap.add_argument("--tight", type=float, default=20, help="how far down the entry may start, pt")
     ap.add_argument("--json")
     args = ap.parse_args()
 
-    site = Site(args.site)  # если сайт не ответил, проверка завершится с ошибкой
+    site = Site(args.site)  # if the site does not respond, verification exits with an error
     pdf = Pdf(args.pdf)
     problems = []
     report = {"site_pages": len(site.pages)}
@@ -633,7 +633,7 @@ def main():
     catalog = pdf.reader.trailer["/Root"]
     names = catalog.get("/Names")
     if "/Dests" in catalog or (names is not None and "/Dests" in names.get_object()):
-        problems.append("в PDF остались именованные назначения")
+        problems.append("named destinations remain in the PDF")
 
     sections = top_level_sections(pdf)
     report["sections"] = [s[0] for s in sections]
@@ -645,7 +645,7 @@ def main():
                 section_by_title[page_key(sp["url"])] = (section[1], end)
     for sp in site.pages.values():
         if page_key(sp["url"]) not in section_by_title:
-            problems.append("нет раздела для %s (%s)" % (sp["url"], sp["title"]))
+            problems.append("no section for %s (%s)" % (sp["url"], sp["title"]))
     if problems:
         print("\n".join(problems))
         return 1
@@ -661,11 +661,11 @@ def main():
             json.dump(report, f, ensure_ascii=False, indent=1)
     print(json.dumps({k: v for k, v in report.items() if k != "problems"}, ensure_ascii=False, indent=1))
     if problems:
-        print("ПРОБЛЕМЫ:")
+        print("PROBLEMS:")
         for p in problems:
             print(" -", p[:1500])
         return 1
-    print("ВСЁ ВЕРНО: ни одной ссылки мимо")
+    print("ALL OK: no link misses its target")
     return 0
 
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Проверка движком PDFKit, тем же, что в Preview: ссылки, подсказки, «назад» и «вперёд».
+"""Check with PDFKit, the engine Preview uses: links, tooltips, Back and Forward.
 
-Нужен pyobjc-framework-Quartz, только macOS. Запуск: python pdfkit_check.py файл.pdf
+Requires pyobjc-framework-Quartz, macOS only. Usage: python pdfkit_check.py file.pdf
 """
 import sys
 
@@ -11,7 +11,7 @@ from Foundation import NSURL, NSMakeRect
 
 doc = Quartz.PDFDocument.alloc().initWithURL_(NSURL.fileURLWithPath_(sys.argv[1]))
 if doc is None:
-    sys.exit("Не удалось открыть PDF")
+    sys.exit("Could not open the PDF")
 
 goto, uri, other, contents = 0, 0, 0, 0
 targets = []
@@ -29,12 +29,12 @@ for i in range(doc.pageCount()):
             other += 1
         if a.contents():
             contents += 1
-print("Листов %d, GoTo %d, URL %d, прочих %d, с подсказкой /Contents %d" % (doc.pageCount(), goto, uri, other, contents))
+print("Sheets: %d, GoTo: %d, URL: %d, other: %d, with /Contents tooltip: %d" % (doc.pageCount(), goto, uri, other, contents))
 outline = doc.outlineRoot()
-print("Закладок верхнего уровня: %d" % (outline.numberOfChildren() if outline else 0))
+print("Top-level bookmarks: %d" % (outline.numberOfChildren() if outline else 0))
 
 view = Quartz.PDFView.alloc().initWithFrame_(NSMakeRect(0, 0, 800, 1000))
-view.setDisplayMode_(Quartz.kPDFDisplaySinglePage)  # так текущий лист определяется однозначно
+view.setDisplayMode_(Quartz.kPDFDisplaySinglePage)  # makes the current sheet unambiguous
 view.setDocument_(doc)
 failures = 0
 
@@ -49,22 +49,22 @@ sample = targets[:: max(1, len(targets) // 40)]
 for start, dest in sample:
     page = dest.page()
     if not 0 <= dest.point().y <= page.boundsForBox_(Quartz.kPDFDisplayBoxMediaBox).size.height:
-        fail("Координата цели вне листа: с листа %d, y = %r" % (start + 1, dest.point().y))
+        fail("Target coordinate is off the sheet: from sheet %d, y = %r" % (start + 1, dest.point().y))
     view.goToPage_(doc.pageAtIndex_(start))
     origin = doc.pageAtIndex_(start)
     view.goToDestination_(dest)
     if view.currentPage() != page:
-        fail("Мимо листа: с листа %d" % (start + 1))
+        fail("Wrong sheet: from sheet %d" % (start + 1))
     if not view.canGoBack():
-        fail("Нет истории после перехода с листа %d" % (start + 1))
+        fail("No history after the jump from sheet %d" % (start + 1))
     view.goBack_(None)
     if view.currentPage() != origin:
-        fail("«Назад» не вернул на лист %d" % (start + 1))
+        fail("Back did not return to sheet %d" % (start + 1))
     if not view.canGoForward():
-        fail("Нет «вперёд» на листе %d" % (start + 1))
+        fail("Forward is unavailable on sheet %d" % (start + 1))
     view.goForward_(None)
     if view.currentPage() != page:
-        fail("«Вперёд» не вернул к цели с листа %d" % (start + 1))
-print("Проверено переходов: %d" % len(sample))
-print("PDFKit: назад и вперёд работают" if not failures else "PDFKit: ошибок %d" % failures)
+        fail("Forward did not return to the target from sheet %d" % (start + 1))
+print("Jumps checked: %d" % len(sample))
+print("PDFKit: Back and Forward work" if not failures else "PDFKit: %d errors" % failures)
 sys.exit(1 if failures else 0)

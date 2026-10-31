@@ -1,76 +1,123 @@
-# clickable-www2pdf
+<div align="center">
 
-Превращает статичный сайт в один PDF, который ведёт себя как сайт, но работает полностью офлайн.
+# www-2-pdf
 
-- Каждая страница сайта становится разделом, в закладках есть вложенное оглавление: h1–h3 и раскрывашки (люди в родословной).
-- Вид как на экране: цвета, фоны, бейджи, шрифты. Тема всегда светлая.
-- Все `<details>` раскрыты. Также раскрываются блоки с `aria-controls`, вкладки и `.collapse`.
-- Ссылки на свой сайт становятся переходами внутри PDF: `page.html` ведёт на начало раздела, `page.html#id` и `#id` ведут точно на элемент.
-- Картинки, на которые ссылается сайт, идут приложением «Изображения». Клик по снимку открывает его на отдельном листе.
-- Внешние ссылки остаются обычными ссылками в интернет.
-- Полный текст из `title` ссылки записывается в `/Contents` её аннотации.
+**Turn a static website into one PDF that still behaves like the website.**
 
-## Запуск
+Click a link and you jump inside the file. Press back and you return. No internet required.
 
+![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)
+![Tested on macOS](https://img.shields.io/badge/tested%20on-macOS-000000?logo=apple&logoColor=white)
+![Chromium](https://img.shields.io/badge/renders%20with-Chromium-4285F4?logo=googlechrome&logoColor=white)
+![Works offline](https://img.shields.io/badge/result-works%20offline-2F8A4C)
+
+</div>
+
+```bash
+python3 www2pdf.py https://example.com/ -o ~/Desktop/site.pdf
 ```
-python3 www2pdf.py http://example.com/ -o ~/Desktop/site.pdf
+
+That is the whole setup. On the first run the script installs its own dependencies into `~/.www2pdf`, with no `sudo`, Homebrew or wget.
+
+## When it helps
+
+You have a static site and want it as a single file that keeps working:
+
+- **Documentation** to read on a plane or hand to a client
+- **Research notes and knowledge bases** with many cross-references between pages
+- **Project and course sites** to archive before they go offline
+- **Reports and catalogs** to send as one attachment instead of a link
+
+## What you get
+
+Printing a site page by page gives you a pile of files that lose their links and hide half their content. Tools that convert a whole site tend to give you either its look or working internal links. This one aims for both:
+
+| On the website | In the PDF |
+|---|---|
+| Each page | A section, with a nested bookmark outline of `h1`–`h3` headings and disclosures |
+| `page.html` | A jump to the start of that section |
+| `page.html#id` and `#id` | A jump to that exact element, not just its page |
+| External links | Regular web links |
+| Links to the site's own images | A jump to the full image in an "Images" appendix |
+| Collapsed `<details>`, `aria-controls` panels, tabs, `.collapse` | Expanded, with the text kept |
+| Scrollable boxes and wide tables | Printed in full, nothing cut off |
+| Colors, backgrounds, badges, fonts | Same as on screen, always in the light theme |
+| Sticky and fixed headers | Printed once, never covering the text |
+| A link's `title` tooltip | Stored in the link's `/Contents` |
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Crawl the site<br>same host and port] --> B[Prepare each page<br>expand, unstick, load images]
+    B --> C[Print with<br>headless Chromium]
+    C --> D[Merge the parts<br>with pypdf]
+    D --> E[Rewrite every link as<br>page + exact coordinates]
+    E --> F[One offline PDF]
 ```
 
-При первом запуске зависимости (Playwright и pypdf) сами ставятся в `~/.www2pdf` (другой каталог можно задать переменной `WWW2PDF_VENV`; каталог, где есть что-то кроме файлов самого venv, инструмент не тронет). Нужен только `python3` версии 3.9 или новее; sudo, Homebrew и wget не нужны. Браузер берётся установленный: Chrome, Edge, Brave или Yandex. Если ни одного нет, скачивается Chromium.
+Every internal link becomes an explicit `[page /XYZ 0 y null]` destination. Nothing stays a named destination, so identical ids on different pages cannot collide, and PDF viewers record each jump in their history.
 
-## Опции
+Chromium writes anchor coordinates inaccurately: as if the scale were 1, with margin handling that depends on the version, and it shrinks pages wider than the sheet. So the correction is not hard-coded. Two probe anchors on every page compare the recorded position with the real one, and the jumps stay accurate if Chromium's behavior changes. If the measurement fails, the summary warns about it.
 
-| Опция | Что делает | По умолчанию |
+## Usage
+
+```bash
+python3 www2pdf.py URL -o OUTPUT.pdf [options]
+```
+
+| Option | Description | Default |
 |---|---|---|
-| `-o файл` | куда сохранить PDF | обязательна |
-| `--scale 0.75` | масштаб печати, 0.1–2. Меньше значит мельче текст; при большом масштабе сайт может перейти на мобильную вёрстку | 0.75 |
-| `--paper A4\|Letter` | формат листа | A4 |
-| `--margin 8` | поля в мм | 8 |
-| `--max 500` | предел числа страниц сайта | 500 |
-| `--long-pages` | одна длинная страница PDF на страницу сайта | выключено |
-| `--no-images` | без приложения с картинками; ссылки на картинки останутся ссылками в интернет | выключено |
-| `--chrome путь` | путь к браузеру на движке Chromium | поиск среди установленных |
-| `--timeout 120` | таймаут загрузки страницы, секунд | 120 |
-| `--report файл.json` | сохранить отчёт в JSON | нет |
+| `-o FILE` | Where to save the PDF | required |
+| `--scale 0.75` | Print scale, 0.1–2. Lower means smaller text; a high scale can trigger the site's mobile layout | `0.75` |
+| `--paper A4\|Letter` | Paper size | `A4` |
+| `--margin 8` | Margins in mm | `8` |
+| `--max 500` | Limit on the number of site pages | `500` |
+| `--long-pages` | One long PDF sheet per site page | off |
+| `--no-images` | Skip the images appendix; links to images stay web links | off |
+| `--chrome PATH` | Path to a Chromium-based browser | auto-detected |
+| `--timeout 120` | Page load timeout in seconds | `120` |
+| `--report FILE.json` | Save a report as JSON | off |
 
-В конце работы печатается сводка: число листов, раскрытых `details`, ссылок с якорем и список якорей, которых нет на сайте.
+The script uses an installed Chrome, Edge, Brave or Yandex browser, and downloads Chromium if it finds none. It needs Python 3.9 or newer. To install dependencies elsewhere, set `WWW2PDF_VENV`; a folder that contains anything other than a virtual environment's own files is never deleted.
 
-## Назад и вперёд
+Every run ends with a summary: sheets, expanded `<details>`, anchored links, and each anchor that does not exist on the site.
 
-- **Preview:** меню «Переход» → «Назад» и «Вперёд», клавиши `⌘[` и `⌘]`.
-- **Acrobat:** «Просмотр» → «Показать/Скрыть» → «Переход по страницам» → «Предыдущий вид» и «Следующий вид», клавиши `⌘←` и `⌘→`.
-- **Firefox:** кнопки браузера «назад» и «вперёд».
+## Going back and forward
 
-Закладки в Preview открываются через «Вид» → «Оглавление».
+| Viewer | Back | Forward |
+|---|---|---|
+| Preview | `⌘[` | `⌘]` |
+| Acrobat | `⌘←` | `⌘→` |
+| Firefox | Browser back button | Browser forward button |
 
-## Ограничения
+In Preview, open the bookmarks with **View → Table of Contents**.
 
-- Только статичный контент: JavaScript-меню, которым нужен клик, не нажимаются. Раскрываются только перечисленные выше виды раскрывашек.
-- Обход идёт по ссылкам `<a href>` и областям `<area href>`. Страница, на которую никто не ссылается, в PDF не попадёт.
-- Сами области карты-картинки `<area>` в PDF не кликаются: они перечисляются в сводке.
-- Страница шире листа печатается с меньшим масштабом, чтобы ничего не обрезалось: текст там мельче, и сводка об этом сообщает.
-- Прокручиваемые блоки (`overflow: auto` и `scroll`) раскрываются целиком. Всё, что сайт прячет через `overflow: hidden`, остаётся как на экране и в PDF не попадёт.
-- Ссылка на id, которого нет на странице, ведёт на начало раздела. Такие ссылки перечисляются в сводке.
-- Если id на странице повторяется, переход идёт на первый элемент, как в браузере.
-- Свои файлы, кроме картинок (PDF, архивы), в PDF не встраиваются: ссылки на них остаются ссылками в интернет и показываются в сводке.
-- Подсказку из `/Contents` показывают не все просмотрщики. Полный текст источника в любом случае виден после перехода к нему.
-- В `--long-pages` страница длиннее предела PDF (5,08 м при масштабе 1) займёт несколько листов.
+## Limitations
 
-## Как устроены координаты
+- **Static content only.** JavaScript menus that need a click are not pressed. Only the disclosures listed above are expanded.
+- **Pages must be linked.** The crawl follows `<a href>` and `<area href>`, so a page nothing links to is not included.
+- **Image-map areas are not clickable.** `<area>` regions do not become links in the PDF; the summary lists them.
+- **Missing anchors go to the section start,** as in a browser, and the summary lists them. With duplicate ids, a jump goes to the first element.
+- **Only images are embedded.** Links to the site's other files, such as PDFs and archives, stay web links and appear in the summary.
+- **Very wide pages get smaller text.** They print at a lower scale so nothing is cut off, and the summary says so.
+- **`overflow: hidden` is respected.** Whatever a site hides this way stays as it is on screen and is not in the PDF.
+- **Tooltips vary by viewer.** Not every viewer displays `/Contents`.
+- **Very long pages may split.** With `--long-pages`, a page taller than the PDF limit of about 5 m takes several sheets.
 
-Chrome записывает координаты якорей неточно: будто масштаб равен 1, а учёт поля зависит от версии (Chrome 156 поле не добавляет). Страницу шире листа он ещё и ужимает сам. Поэтому поправка не зашита в код: на каждую страницу добавляются два пробных якоря, и их настоящая и записанная координаты сравниваются. Если поведение Chrome изменится, переходы останутся точными. Если измерить не удалось, сводка предупредит о неточных переходах.
+## Testing
 
-## Тесты
-
+```bash
+tests/run_all.sh                      # mock site at scale 0.5, 0.75, 1 and 2, long pages, Letter
+tests/run_all.sh https://example.com/ # also a real site and a PDFKit check on macOS
 ```
-tests/run_all.sh                            # макет: scale 0.5, 0.75, 1, 2, длинные страницы, Letter
-tests/run_all.sh http://example.com/ # плюс реальный сайт и проверка движком PDFKit
-```
 
-- `tests/make_mock.py` генерирует макет: 4 страницы, 160 людей, 120 источников, скрытые маркеры.
-- `tests/verify.py` берёт ожидания из самого сайта, независимо от `www2pdf.py`. Для каждой ссылки проверяет текст под ней, порядок среди ссылок с тем же текстом, запись у самой точки перехода (не дальше 20 pt и без другого текста над ней) и форму назначения. Также проверяет весь текст страниц, включая скрытый, порядок листов, закладки поэлементно, подсказки `/Contents`, пустые и обрезанные листы, текст за краем листа. Цвет текста не проверяет: внешний вид смотрят глазами.
-- `tests/test_mutations.py` портит PDF и сайт разными способами и требует, чтобы верификатор это заметил.
-- `tests/test_edges.py` прогоняет каверзные сайты: SVG, `<base>`, `<a name>`, редиректы, зависшие картинки, необычные id, защиту каталога venv.
-- `tests/pdfkit_check.py` ходит по ссылкам, «назад» и «вперёд» движком PDFKit, тем же, что в Preview (только macOS).
+| Script | What it does |
+|---|---|
+| `tests/make_mock.py` | Generates a mock site: 4 pages, 160 entries, 120 sources, hidden markers |
+| `tests/verify.py` | Takes its expectations from the site itself, independently of `www2pdf.py`, and checks every link, all text, bookmarks and sheets |
+| `tests/test_mutations.py` | Damages PDFs and sites on purpose and requires the verifier to notice each time |
+| `tests/test_edges.py` | Runs tricky sites: SVG links, `<base>`, `<a name>`, redirects, hanging images and fonts, unusual ids |
+| `tests/pdfkit_check.py` | Follows links, back and forward using PDFKit, the engine behind Preview (macOS only) |
 
-Тестовые зависимости ставятся в `~/.www2pdf-tests`.
+The verifier does not check text color, so review the visual result yourself. Test dependencies install into `~/.www2pdf-tests`.
