@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Полный прогон: макет на scale 0.5, 0.75 и 1, режим длинных страниц и (по желанию) реальный сайт.
+# Полный прогон: макет на scale 0.5, 0.75, 1 и 2, режим длинных страниц и (по желанию) реальный сайт.
 # Запуск: tests/run_all.sh [адрес реального сайта]
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -22,7 +22,7 @@ sleep 1
 
 FAILED=0
 URL="http://127.0.0.1:$PORT/"
-for SCALE in 0.5 0.75 1; do
+for SCALE in 0.5 0.75 1 2; do
   echo "=== Макет, scale $SCALE ==="
   python3 "$ROOT/www2pdf.py" "$URL" -o "$OUT/mock_$SCALE.pdf" --scale "$SCALE" 2>/dev/null | head -6
   [ "${pipestatus[1]}" = "0" ] || FAILED=1
@@ -41,6 +41,9 @@ python3 "$ROOT/www2pdf.py" "$URL" -o "$OUT/mock_letter.pdf" --paper Letter --mar
 [ "${pipestatus[1]}" = "0" ] || FAILED=1
 "$PY" "$HERE/verify.py" "$OUT/mock_letter.pdf" "$URL" --markers "$OUT/site/markers.txt" | tail -3
 [ "${pipestatus[1]}" = "0" ] || FAILED=1
+
+echo "=== Верификатор ловит испорченные PDF ==="
+"$PY" "$HERE/test_mutations.py" "$OUT/mock_0.75.pdf" "$URL" "$OUT/site" || FAILED=1
 
 echo "=== Каверзные сайты ==="
 "$PY" "$HERE/test_edges.py" || FAILED=1

@@ -829,6 +829,7 @@ def build_pdf(crawl, appendix, args):
         for offset, src_page in enumerate(part["reader"].pages):
             out_page = writer.pages[part["start"] + offset]
             fresh = []
+            seen_annots = set()
             for ref in src_page.get("/Annots") or []:
                 annot = ref.get_object()
                 if annot.get("/Subtype") != "/Link":
@@ -849,6 +850,11 @@ def build_pdf(crawl, appendix, args):
                     uri, title = links[number]["href"], links[number]["title"]
                 else:
                     title = other_titles.get(uri)
+                # Chrome иногда пишет одну и ту же ссылку на листе дважды
+                annot_key = (tuple(round(v, 1) for v in rect), uri)
+                if annot_key in seen_annots:
+                    continue
+                seen_annots.add(annot_key)
                 action, kind = resolve_uri(uri, part)
                 if action is None:
                     action = DictionaryObject({NameObject("/S"): NameObject("/URI"),

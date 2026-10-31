@@ -5,8 +5,8 @@
 Для каждой ссылки в PDF: текст под ней сверяется с видимым текстом ссылки на сайте,
 порядок ссылок с одинаковым текстом должен совпадать с сайтом, а ожидаемая запись
 (ФИО из summary, код и заголовок источника) должна стоять у самой точки перехода.
-Также проверяются форма назначений, весь текст страниц по порядку (в том числе скрытый),
-закладки поэлементно, подсказки /Contents, пустые листы и выход текста за лист.
+Также проверяются форма назначений, весь текст страниц (в том числе скрытый), порядок листов,
+закладки поэлементно, подсказки /Contents, пустые и обрезанные листы, выход текста за лист.
 
 Не проверяется: цвет текста (белый на белом пройдёт). Внешний вид смотрят глазами.
 
@@ -20,6 +20,7 @@ import posixpath
 import re
 import sys
 import unicodedata
+import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
 from urllib.parse import unquote, urljoin, urlsplit
@@ -31,6 +32,9 @@ from pypdf.generic import ArrayObject, NullObject
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".avif"}
 TOP_TOLERANCE = 3  # допуск в pt: глиф может начинаться чуть выше точки перехода
+LINE_TOLERANCE = 6  # символы ближе этого по вертикали считаем одной строкой
+HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+MIN_ORDER_NODE = 5  # короче этого узел может случайно оказаться частью другого текста
 NON_TEXT_TAGS = {"script", "style", "noscript", "template", "head", "title"}
 
 
@@ -55,6 +59,11 @@ def page_key(url):
     if posixpath.basename(path).lower() in ("index.html", "index.htm"):
         path = posixpath.dirname(path).rstrip("/") + "/"
     return parts.scheme, parts.netloc, path, parts.query
+
+
+def destination_form(item):
+    """Закладка должна быть вида /XYZ 0 y null."""
+    return str(item["/Type"]) == "/XYZ" and float(item.left) == 0 and isinstance(item.zoom, (NullObject, type(None)))
 
 
 def expected_text(el):
@@ -98,13 +107,16 @@ class Site:
     def __init__(self, root):
         self.root = root
         self.pages = {}
+        self.image_heads = defaultdict(set)
         queue, seen = [root], {page_key(root)}
         while queue:
             url = queue.pop(0)
             try:
                 html, ctype = fetch(url)
-            except OSError:
+            except urllib.error.HTTPError:  # битая ссылка на сайте, это не ошибка проверки
                 continue
+            except OSError as exc:
+                raise SystemExit("ОШИБКА: сайт не ответил, проверка невозможна: %s (%s)" % (url, exc))
             if "html" not in ctype:
                 continue
             soup = BeautifulSoup(html, "html.parser")
@@ -119,6 +131,10 @@ class Site:
                 href = urljoin(url, a["href"])
                 links.append({"href": href, "text": norm(a.get_text()), "title": a.get("title"),
                               "own": self.is_own(href)})
+                if a.find("img") is not None and self.is_own(href):
+                    head = next((h for h in (p.find(["h1", "h2", "h3", "h4", "figcaption"]) for p in a.parents) if h), None)
+                    if head is not None:
+                        self.image_heads[href].add(norm(head.get_text()))
                 if self.is_own(href) and posixpath.splitext(urlsplit(href).path)[1].lower() not in IMAGE_EXT:
                     target = page_key(href)
                     if target not in seen:
@@ -126,6 +142,8 @@ class Site:
                         queue.append(href.split("#")[0])
             self.pages[key] = {"url": url, "soup": soup, "ids": ids, "links": links,
                                "title": soup.title.get_text().strip() if soup.title else ""}
+        if not self.pages:
+            raise SystemExit("ОШИБКА: на сайте не найдено ни одной страницы, проверка невозможна: %s" % root)
 
     def is_own(self, href):
         a, b = urlsplit(href), urlsplit(self.root)
@@ -138,6 +156,10 @@ class Pdf:
         self.plumber = pdfplumber.open(path)
         self.page_index = {p.indirect_reference.idnum: i for i, p in enumerate(self.reader.pages)}
         self.chars = {}
+        self.shas = {}
+        # Допуски рассчитаны на кегль около 9 pt, на крупном масштабе всё пропорционально больше
+        sizes = sorted(c["size"] for p in self.plumber.pages[:5] for c in p.chars[:2000]) or [9]
+        self.zoom = max(1.0, sizes[len(sizes) // 2] / 9)
 
     def page_chars(self, index):
         if index not in self.chars:
@@ -149,34 +171,60 @@ class Pdf:
         images = [v.get_object() for v in (xobjects.get_object().values() if xobjects else [])]
         return [o for o in images if o.get("/Subtype") == "/Image"]
 
+    def file_sha(self, href):
+        if href not in self.shas:
+            with urllib.request.urlopen(href, timeout=60) as r:
+                self.shas[href] = hashlib.sha1(r.read()).hexdigest()
+        return self.shas[href]
+
     def page_has_image(self, index, href):
         images = self.page_images(index)
         if not images:
             return False
         if not href.lower().endswith((".jpg", ".jpeg")):
             return True
-        with urllib.request.urlopen(href, timeout=60) as r:
-            want = hashlib.sha1(r.read()).hexdigest()
-        return any(hashlib.sha1(o._data).hexdigest() == want for o in images)
+        return any(hashlib.sha1(o._data).hexdigest() == self.file_sha(href) for o in images)
 
     def height(self, index):
         return float(self.reader.pages[index].mediabox.height)
 
-    def landing_gap(self, index, y, want, window):
-        """На сколько pt ниже точки перехода начинается want. None, если его нет в окне."""
+    def first_line(self, index):
+        """Первая строка листа: на первом листе раздела это обычно шапка сайта."""
+        chars = [c for c in self.page_chars(index) if norm(c["text"])]
+        if not chars:
+            return ""
+        top = min(c["top"] for c in chars)
+        return norm("".join(c["text"] for c in chars if c["top"] - top <= LINE_TOLERANCE * self.zoom))
+
+    def landing(self, index, y, want, window, tight, heading=False, header=""):
+        """Проверяет, что want стоит сразу у точки перехода. Возвращает (разрыв в pt, причина ошибки)."""
         top = self.height(index) - y
+        window, tight = window * self.zoom, tight * self.zoom
         chars = [c for c in self.page_chars(index) if top - TOP_TOLERANCE <= c["top"] <= top + window]
         pieces = [norm(c["text"]) for c in chars]
         joined = "".join(pieces)
         at = joined.find(want)
         if at < 0:
-            return None
-        position = 0
+            return None, "нет ожидаемого текста %r" % want
+        position, start = 0, None
         for char, piece in zip(chars, pieces):
             if position >= at and piece:
-                return max(0, char["top"] - top)
+                start = char
+                break
             position += len(piece)
-        return None
+        gap = max(0, start["top"] - top)
+        if gap > tight:
+            return gap, "запись на %.1f pt ниже точки перехода" % gap
+        first_top = min(c["top"] for c, piece in zip(chars, pieces) if piece)
+        if start["top"] - first_top > LINE_TOLERANCE * self.zoom:
+            return gap, "над записью стоит другой текст"
+        if heading:
+            line = norm("".join(c["text"] for c in chars if abs(c["top"] - start["top"]) <= LINE_TOLERANCE * self.zoom))
+            if header and line == header and line != want:
+                return gap, "переход встал на шапку сайта, а не на заголовок"
+            if joined.count(want) > 1:
+                return gap, "такой же текст ниже: переход встал не на заголовок"
+        return gap, None
 
     def text_under(self, index, rect):
         """Слово считаем «под ссылкой» по центру символа: запятая вылезает за прямоугольник."""
@@ -269,10 +317,12 @@ def check_link(pdf, site, link, cand, args, section_by_title, counts, missing_li
     index, y = link["target"]
     if posixpath.splitext(urlsplit(href).path)[1].lower() in IMAGE_EXT:
         # Перешли на лист приложения, где лежит именно этот файл (JPEG хранится побайтно)
-        if link["text"] == "" and pdf.page_has_image(index, href):
-            counts["image_goto"] += 1
-            return None
-        return "на листе нет этой картинки"
+        if link["text"] != "" or not pdf.page_has_image(index, href):
+            return "на листе нет этой картинки"
+        if pdf.height(index) - y > args.window * pdf.zoom:
+            return "переход не к верху листа с картинкой"
+        counts["image_goto"] += 1
+        return None
     target_key = page_key(href)
     if target_key not in section_by_title:
         return "нет раздела для цели"
@@ -284,11 +334,9 @@ def check_link(pdf, site, link, cand, args, section_by_title, counts, missing_li
         want = expected_text(element)
         if not first <= index < last:
             return "цель в чужом разделе"
-        gap = pdf.landing_gap(index, y, want, args.window)
-        if gap is None:
-            return "нет ожидаемого текста %r" % want
-        if gap > args.tight:
-            return "запись на %.1f pt ниже точки перехода" % gap
+        gap, why = pdf.landing(index, y, want, args.window, args.tight, element.name in HEADINGS, pdf.first_line(first))
+        if why:
+            return why
         gaps.append(gap)
         counts["anchor_exact"] += 1
         return None
@@ -338,14 +386,16 @@ def check_links(pdf, site, args, section_by_title, report, problems):
             if why:
                 misses.append({"from": sp["url"], "page": link["page"] + 1, "text": text, "href": cand["href"],
                                "why": why, "goto": str(link.get("target"))})
-            if (cand.get("title") or None) != (link.get("contents") or None):
-                wrong_contents.append((sp["url"], link["page"] + 1, text, cand.get("title"), link.get("contents")))
-            elif cand.get("title"):
-                counts["title_in_contents"] += 1
+            rects = pdf_links[i:i + used]
             i += used
             # Ссылка с картинкой внутри текста даёт ещё и пустой прямоугольник с той же целью
             while i < len(pdf_links) and pdf_links[i]["text"] == "" and pdf_links[i].get("raw") == link.get("raw"):
+                rects.append(pdf_links[i])
                 i += 1
+            if any((cand.get("title") or None) != (r.get("contents") or None) for r in rects):
+                wrong_contents.append((sp["url"], link["page"] + 1, text, cand.get("title"), [r.get("contents") for r in rects]))
+            elif cand.get("title"):
+                counts["title_in_contents"] += 1
         for lst in pending.values():
             for lost in lst:
                 problems.append("ссылка с сайта не найдена в PDF: %s -> %s (%r)" % (sp["url"], lost["href"], lost["text"]))
@@ -364,45 +414,92 @@ def check_links(pdf, site, args, section_by_title, report, problems):
         problems.append("остались служебные крошечные ссылки: %d" % tiny)
 
 
-def split_across_sheets(stream, text):
-    """Строка таблицы на два листа: в потоке текст ячейки разорван текстом соседней ячейки."""
-    pieces = 0
-    while text:
-        size = len(text)
-        while size >= 8 and text[:size] not in stream:
+class SectionText:
+    """Текст раздела одной строкой и для каждого символа его лист и положение по x."""
+
+    def __init__(self, pdf, first, last):
+        pieces, self.sheets, self.xs = [], [], []
+        for i in range(first, last):
+            for c in pdf.page_chars(i):
+                piece = norm(c["text"])
+                pieces.append(piece)
+                self.sheets.extend([i] * len(piece))
+                self.xs.extend([c["x0"]] * len(piece))
+        self.text = "".join(pieces)
+
+
+def consume(stream, text):
+    """Убирает из потока одно вхождение text. Возвращает новый поток или None.
+
+    Строка таблицы на два листа разорвана в потоке текстом соседней ячейки, поэтому
+    допускаем до четырёх кусков длиной от 8 символов.
+    """
+    if text in stream:
+        return stream.replace(text, "\0", 1)
+    rest, pieces = text, 0
+    while rest:
+        size = len(rest)
+        while size >= 8 and rest[:size] not in stream:
             size -= 1
-        if size < 8 or pieces == 3:
-            return False
-        text = text[size:]
+        if size < 8 or pieces == 4:
+            return None
+        stream = stream.replace(rest[:size], "\0", 1)
+        rest = rest[size:]
         pieces += 1
-    return True
+    return stream
 
 
 def check_text(pdf, site, args, section_by_title, report, problems):
     """Весь текст страниц, включая скрытый, должен быть в своём разделе PDF столько же раз, сколько на сайте.
 
-    Порядок здесь не сравнивается: колонки Chrome печатает лист за листом вперемешку.
-    Порядок листов проверяют закладки, они должны идти по документу.
+    Каждый узел забирает своё вхождение из потока, начиная с длинных: так короткий узел не
+    засчитается за счёт длинного, в который он входит. Порядок здесь не сравнивается:
+    колонки Chrome печатает лист за листом вперемешку. Узлы короче 8 символов не проверяются.
     """
     total = lost_total = 0
     details_total = details_ok = 0
-    examples = []
+    examples, order_errors = [], []
     all_text = []
     for key, sp in site.pages.items():
         first, last = section_by_title[key]
-        stream = norm("".join(c["text"] for i in range(first, last) for c in pdf.page_chars(i)))
+        section = SectionText(pdf, first, last)
+        stream = section.text
         all_text.append(stream)
         body = sp["soup"].body or sp["soup"]
         strings = visible_strings(body)
-        site_counts = Counter(text for text, _ in strings)
-        lost_texts = {text for text, count in site_counts.items()
-                      if stream.count(text) < count and not split_across_sheets(stream, text)}
         total += len(strings)
-        lost_total += sum(1 for text, _ in strings if text in lost_texts)
-        examples.extend((sp["url"], text[:80]) for text in list(lost_texts)[:5 - len(examples)])
+        lost_nodes = set()
+        for text, node in sorted(strings, key=lambda item: -len(item[0])):
+            if len(text) < 8:
+                continue
+            updated = consume(stream, text)
+            if updated is None:
+                lost_total += 1
+                lost_nodes.add(id(node))
+                if len(examples) < 5:
+                    examples.append((sp["url"], text[:80]))
+            else:
+                stream = updated
         for d in sp["soup"].find_all("details"):
             details_total += 1
-            details_ok += not any(text in lost_texts for text, _ in visible_strings(d))
+            details_ok += not any(id(n) in lost_nodes for _, n in visible_strings(d))
+        # Порядок листов: узлы левой колонки и полной ширины не могут идти назад по листам.
+        # Правую колонку не смотрим: она начинается снова с первого листа сетки.
+        half = float(pdf.plumber.pages[first].width) / 2
+        counts = Counter(text for text, _ in strings)
+        latest = first
+        for text, _ in strings:
+            if len(text) < MIN_ORDER_NODE or counts[text] > 1 or section.text.count(text) != 1:
+                continue
+            at = section.text.find(text)
+            if section.xs[at] >= half:
+                continue
+            if section.sheets[at] < latest:
+                order_errors.append((sp["url"], section.sheets[at] + 1, text[:40]))
+            latest = max(latest, section.sheets[at])
+    report["order_errors"] = len(order_errors)
+    if order_errors:
+        problems.append("листы не по порядку: %d, примеры: %s" % (len(order_errors), order_errors[:5]))
     report["text_nodes_site"] = total
     report["text_nodes_lost"] = lost_total
     report["details_site"] = details_total
@@ -426,14 +523,15 @@ def check_bookmarks(pdf, site, sections, args, section_by_title, report, problem
         entry = next(s for s in sections if s[0] == sp["title"] and s[1] == first)
         section_item, children = entry[2], entry[3]
         total += 1 + len(children)
-        if float(section_item.top) < pdf.height(first) - 1 or float(section_item.top) > pdf.height(first):
-            bad.append((sp["title"], "закладка раздела не у верха листа"))
+        check_section_bookmark(pdf, section_item, first, bad)
         want_titles = expected_bookmarks(sp["soup"])
         got_titles = [clean(str(c.title)) for c in children]
         if [norm(t) for t in want_titles] != [norm(t) for t in got_titles]:
             bad.append((sp["title"], "список закладок не совпадает с сайтом: %d и %d" % (len(got_titles), len(want_titles))))
             continue
         previous = None
+        headings = sp["soup"].find_all(["h1", "h2", "h3"])
+        heading_titles = {norm(h.get_text()) for h in headings}
         for item in children:
             index = pdf.reader.get_destination_page_number(item)
             y = float(item.top)
@@ -441,25 +539,64 @@ def check_bookmarks(pdf, site, sections, args, section_by_title, report, problem
             if previous and (index, -y) < (previous[0], -previous[1] - 1):
                 bad.append((str(item.title)[:50], "закладка выше предыдущей: лист %d" % (index + 1)))
             previous = (index, y)
-            if str(item["/Type"]) != "/XYZ" or float(item.left) != 0 or not isinstance(item.zoom, (NullObject, type(None))):
+            if not destination_form(item):
                 bad.append((str(item.title)[:50], "форма назначения"))
                 continue
-            gap = pdf.landing_gap(index, y, norm(str(item.title))[:25], args.window)
-            if gap is None or gap > args.tight:
-                bad.append((str(item.title)[:50], "лист %d, разрыв %s" % (index + 1, gap)))
-    report["bookmarks_site_sections"] = total
+            title = norm(str(item.title))
+            _, why = pdf.landing(index, y, title[:25], args.window, args.tight, title in heading_titles, pdf.first_line(first))
+            if why:
+                bad.append((str(item.title)[:50], "лист %d: %s" % (index + 1, why)))
+    site_titles = {sp["title"] for sp in site.pages.values()}
+    for title, first, item, children in sections:
+        if title not in site_titles:
+            total += 1 + len(children)
+            check_section_bookmark(pdf, item, first, bad)
+            check_image_bookmarks(pdf, site, children, args, bad)
+    report["bookmarks_total"] = total
     report["bookmarks_bad"] = len(bad)
     if bad:
         problems.append("закладки с ошибкой: %d, примеры: %s" % (len(bad), bad[:8]))
 
 
+def check_section_bookmark(pdf, item, first, bad):
+    if not destination_form(item):
+        bad.append((str(item.title), "форма назначения у закладки раздела"))
+    if not pdf.height(first) - 1 <= float(item.top) <= pdf.height(first):
+        bad.append((str(item.title), "закладка раздела не у верха листа"))
+
+
+def check_image_bookmarks(pdf, site, children, args, bad):
+    """Закладка картинки стоит у верха своего листа, а подпись называет запись, где эта картинка на сайте."""
+    by_sha = {pdf.file_sha(h): h for h in site.image_heads if h.lower().endswith((".jpg", ".jpeg"))}
+    previous = -1
+    for item in children:
+        index = pdf.reader.get_destination_page_number(item)
+        if not destination_form(item):
+            bad.append((str(item.title)[:50], "форма назначения"))
+            continue
+        if index <= previous:
+            bad.append((str(item.title)[:50], "картинки не по порядку"))
+        previous = index
+        _, why = pdf.landing(index, float(item.top), norm(str(item.title))[:25], args.window, args.tight)
+        if why:
+            bad.append((str(item.title)[:50], why))
+        for image in pdf.page_images(index):
+            href = by_sha.get(hashlib.sha1(image._data).hexdigest())
+            if href and not all(h in norm(str(item.title)) for h in site.image_heads[href]):
+                bad.append((str(item.title)[:50], "подпись не от этой картинки: %s" % href))
+
+
 def check_sheets(pdf, report, problems):
     """Пустых листов нет, текст не выходит за лист и не сжат до нечитаемого."""
-    blank, outside, microscopic = [], 0, 0
+    blank, cropped, outside, microscopic = [], [], 0, 0
     for index, page in enumerate(pdf.plumber.pages):
         chars = pdf.page_chars(index)
         if not chars and not pdf.page_images(index):
             blank.append(index + 1)
+        # Просмотрщик показывает CropBox: лист не должен быть обрезан или повёрнут
+        source = pdf.reader.pages[index]
+        if list(map(float, source.cropbox)) != list(map(float, source.mediabox)) or source.get("/Rotate", 0):
+            cropped.append(index + 1)
         for c in chars:
             if c["x0"] < -1 or c["x1"] > float(page.width) + 1 or c["top"] < -1 or c["bottom"] > float(page.height) + 1:
                 outside += 1
@@ -469,6 +606,8 @@ def check_sheets(pdf, report, problems):
     report["blank_sheets"] = blank
     if blank:
         problems.append("пустые листы: %s" % blank[:10])
+    if cropped:
+        problems.append("обрезанные или повёрнутые листы: %s" % cropped[:10])
     if outside:
         problems.append("символов за пределами листа: %d" % outside)
     if microscopic:
@@ -485,7 +624,7 @@ def main():
     ap.add_argument("--json")
     args = ap.parse_args()
 
-    site = Site(args.site)
+    site = Site(args.site)  # если сайт не ответил, проверка завершится с ошибкой
     pdf = Pdf(args.pdf)
     problems = []
     report = {"site_pages": len(site.pages)}
