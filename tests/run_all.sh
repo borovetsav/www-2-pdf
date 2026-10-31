@@ -25,23 +25,30 @@ URL="http://127.0.0.1:$PORT/"
 for SCALE in 0.5 0.75 1; do
   echo "=== Макет, scale $SCALE ==="
   python3 "$ROOT/www2pdf.py" "$URL" -o "$OUT/mock_$SCALE.pdf" --scale "$SCALE" 2>/dev/null | head -6
+  [ "${pipestatus[1]}" = "0" ] || FAILED=1
   "$PY" "$HERE/verify.py" "$OUT/mock_$SCALE.pdf" "$URL" --markers "$OUT/site/markers.txt" --json "$OUT/mock_$SCALE.json" | tail -22
   [ "${pipestatus[1]}" = "0" ] || FAILED=1
 done
 
 echo "=== Макет, длинные страницы ==="
 python3 "$ROOT/www2pdf.py" "$URL" -o "$OUT/mock_long.pdf" --long-pages 2>/dev/null | head -2
+[ "${pipestatus[1]}" = "0" ] || FAILED=1
 "$PY" "$HERE/verify.py" "$OUT/mock_long.pdf" "$URL" --markers "$OUT/site/markers.txt" | tail -3
 [ "${pipestatus[1]}" = "0" ] || FAILED=1
 
 echo "=== Макет, Letter с полями 12 мм ==="
 python3 "$ROOT/www2pdf.py" "$URL" -o "$OUT/mock_letter.pdf" --paper Letter --margin 12 2>/dev/null | head -2
+[ "${pipestatus[1]}" = "0" ] || FAILED=1
 "$PY" "$HERE/verify.py" "$OUT/mock_letter.pdf" "$URL" --markers "$OUT/site/markers.txt" | tail -3
 [ "${pipestatus[1]}" = "0" ] || FAILED=1
 
+echo "=== Каверзные сайты ==="
+"$PY" "$HERE/test_edges.py" || FAILED=1
+
 if [ $# -ge 1 ]; then
   echo "=== Реальный сайт: $1 ==="
-  python3 "$ROOT/www2pdf.py" "$1" -o "$OUT/real.pdf" --report "$OUT/real_tool.json" 2>/dev/null | grep -v '^  http'
+  python3 "$ROOT/www2pdf.py" "$1" -o "$OUT/real.pdf" --report "$OUT/real_tool.json" 2>/dev/null | grep -v 'нет цели'
+  [ "${pipestatus[1]}" = "0" ] || FAILED=1
   "$PY" "$HERE/verify.py" "$OUT/real.pdf" "$1" --json "$OUT/real.json"
   [ $? = 0 ] || FAILED=1
   if [ "$(uname)" = "Darwin" ]; then
